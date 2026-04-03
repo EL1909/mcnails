@@ -1,0 +1,29 @@
+# Entorno Virtual
+venv/
+ENV/
+.env
+estructura.txt
+
+# Python / Django
+*.py[cod]
+*$py.class
+__pycache__/
+db.sqlite3
+media/
+static_root/
+.env
+
+# node_modules should be ignored in root if any, but mostly in frontend
+frontend/node_modules/
+node_modules/
+dist/
+build/
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+
+
