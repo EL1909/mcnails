@@ -1,4 +1,4 @@
-const API_BASE = '/api/calendars';
+const API_BASE = '/mcnails/api/calendars';
 
 export interface TimeSlot {
   start: string;

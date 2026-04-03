@@ -1,4 +1,4 @@
-const API_BASE = '/api/accounts';
+const API_BASE = '/mcnails/api/accounts';
 
 const authHeaders = (token: string) => ({
   'Authorization': `Bearer ${token}`,

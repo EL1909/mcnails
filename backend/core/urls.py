@@ -5,9 +5,9 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/accounts/', include('accounts.urls')),
-    path('api/store/', include('store.urls')),
-    path('api/calendars/', include('calendars.urls')),
+    path('mcnails/api/accounts/', include('accounts.urls')),
+    path('mcnails/api/store/', include('store.urls')),
+    path('mcnails/api/calendars/', include('calendars.urls')),
 ]
 
 if settings.DEBUG:

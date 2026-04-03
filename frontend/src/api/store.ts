@@ -1,4 +1,4 @@
-const API_BASE = '/api/store';
+const API_BASE = '/mcnails/api/store';
 
 export interface Category {
   id: number;
