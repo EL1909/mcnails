@@ -1543,9 +1543,17 @@ function AppContent() {
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [services, setServices] = useState<Service[]>([]);
   const [showAuth, setShowAuth] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
 
   const openAuth = (mode: 'login' | 'register') => { setAuthMode(mode); setShowAuth(true); };
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('uid') && params.get('token')) {
+      setAuthMode('reset');
+      setShowAuth(true);
+    }
+  }, []);
 
   const loadServices = () => {
     fetchProducts()

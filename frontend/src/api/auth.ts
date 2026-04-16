@@ -96,6 +96,29 @@ export const adminUpdateUser = async (
   return res.json();
 };
 
+export const requestPasswordReset = async (email: string) => {
+  const res = await fetch(`${API_BASE}/password-reset/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error('Error al enviar el email');
+  return res.json();
+};
+
+export const confirmPasswordReset = async (uid: string, token: string, new_password1: string, new_password2: string) => {
+  const res = await fetch(`${API_BASE}/password-reset/confirm/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid, token, new_password1, new_password2 }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Error al restablecer la contraseña');
+  }
+  return res.json();
+};
+
 export const updateProfile = async (token: string, data: FormData | object) => {
   const isFormData = data instanceof FormData;
   const res = await fetch(`${API_BASE}/profile/`, {
