@@ -1,7 +1,8 @@
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.core.files.uploadedfile import UploadedFile
-from core.utils import compress_image
+from evz_core.utils import compress_image
 import uuid
 import time
 
@@ -45,7 +46,9 @@ class User(AbstractUser):
 
 
 class Profile(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile'
+    )
     phone = models.CharField(max_length=30, blank=True)
     profile_picture = models.ImageField(upload_to=profile_picture_path, null=True, blank=True)
     notes = models.TextField(blank=True, help_text="Notas internas sobre la cliente")

@@ -86,8 +86,10 @@ class ProfileView(generics.RetrieveUpdateAPIView):
 
 class UserListView(generics.ListAPIView):
     """
-    Lista de clientes — solo admin.
-    EsfuerzoVZ consume este endpoint para ver las clientas de MCnails.
+    Lista de clientes — solo admin. La consume el panel de esta empresa.
+
+    EsfuerzoVZ ya NO la consume: los datos personales de las clientas no salen
+    de este sistema. Hacia allá solo viajan agregados, vía evz_sync.
     """
     queryset = User.objects.all().select_related('profile').order_by('-date_joined')
     serializer_class = UserPublicSerializer

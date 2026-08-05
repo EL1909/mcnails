@@ -1,0 +1,14 @@
+Hola {{ appointment.customer_name }},
+
+Tu cita en {{ business_name }} quedó reservada.
+
+  Fecha:    {{ date_label }}
+  Hora:     {{ time_label }} ({{ timezone }})
+  Servicio: {% for s in services %}{{ s }}{% if not forloop.last %}, {% endif %}{% endfor %}
+{% if address %}
+  Dirección: {{ address }}{% endif %}{% if phone %}
+  Teléfono:  {{ phone }}{% endif %}
+
+Si necesitas cambiar o cancelar, respóndenos a este correo.
+
+{{ business_name }}

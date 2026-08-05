@@ -36,7 +36,15 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-dev-key')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG') == 'True'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'esfuerzovz.com', 'www.esfuerzovz.com']
+def _csv_env(key, default):
+    """Lee una variable de entorno separada por comas como lista."""
+    raw = os.environ.get(key, default)
+    return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+ALLOWED_HOSTS = _csv_env(
+    'ALLOWED_HOSTS', 'localhost,127.0.0.1,esfuerzovz.com,www.esfuerzovz.com'
+)
 
 
 # Application definition
@@ -51,10 +59,15 @@ INSTALLED_APPS = [
     # Third party
     'rest_framework',
     'corsheaders',
-    # Local
+    # Backbone
+    'evz_core',
+    'evz_store',
+    'evz_treasury',
+    'evz_billing',
+    'evz_calendars',
+    'evz_sync',
+    # Propias del cliente
     'accounts',
-    'store',
-    'calendars',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
@@ -70,11 +83,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:5173',   # MCnails frontend dev
-    'http://localhost:3000',   # EsfuerzoVZ frontend dev
-    'https://esfuerzovz.com',
-]
+CORS_ALLOWED_ORIGINS = _csv_env(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:5173,http://localhost:3000,https://esfuerzovz.com',
+)
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
@@ -147,7 +159,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Zona horaria del NEGOCIO, no del servidor ni del visitante. Las citas son
+# presenciales: la hora que importa es la del local. Se guarda todo en UTC
+# (USE_TZ) y se muestra en esta zona.
+TIME_ZONE = os.environ.get('TIME_ZONE', 'America/Caracas')
 
 USE_I18N = True
 
@@ -164,7 +179,24 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://esfuerzovz.com/mcnails')
 
-FORCE_SCRIPT_NAME = '/mcnails'
+# Montaje bajo subruta. URL_PREFIX y FORCE_SCRIPT_NAME son ALTERNATIVAS, no
+# se usan juntas: si se ponen las dos, reverse() genera /mcnails/mcnails/...
+# y se rompen los enlaces de email y los redirects del admin.
+#
+#   Nginx pasa la ruta completa  → URL_PREFIX='mcnails/', FORCE_SCRIPT_NAME=''
+#   Nginx quita el prefijo       → URL_PREFIX='',         FORCE_SCRIPT_NAME='/mcnails'
+#   Dominio propio (mcnails.com) → ambas vacías
+#
+# Hoy Nginx pasa la ruta completa: si la quitara, el patrón 'mcnails/admin/'
+# no casaría y todo daría 404.
+URL_PREFIX = os.environ.get('URL_PREFIX', 'mcnails/')
+FORCE_SCRIPT_NAME = os.environ.get('FORCE_SCRIPT_NAME', '') or None
+
+# Integración con EsfuerzoVZ. El token lo emite EsfuerzoVZ y es un secreto,
+# por eso vive aquí y no en BusinessProfile. Los datos de negocio (razón
+# social, project slug) sí van en BusinessProfile, editables desde el admin.
+EVZ_API_URL = os.environ.get('EVZ_API_URL', 'https://esfuerzovz.com')
+EVZ_API_TOKEN = os.environ.get('EVZ_API_TOKEN', '')
 
 EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')

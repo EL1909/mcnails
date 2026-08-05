@@ -12,6 +12,7 @@ import {
   Clock,
   MapPin,
   Phone,
+  Mail,
   CheckCircle2,
   CreditCard,
   Menu,
@@ -31,6 +32,7 @@ import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
 import listPlugin from '@fullcalendar/list';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { BusinessProvider, useBusiness } from './context/BusinessContext';
 import { AuthModal } from './components/AuthModal';
 
 // --- Types ---
@@ -84,6 +86,36 @@ const GALLERY = [
 
 // --- Components ---
 
+/** Logo + nombre de la empresa, tomados del backend (BusinessProfile). */
+const BusinessMark = () => {
+  const { business } = useBusiness();
+  const initials = (business.trade_name || 'MC')
+    .split(' ')
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+
+  return (
+    <>
+      {business.logo ? (
+        <img
+          src={business.logo}
+          alt={business.trade_name}
+          className="w-10 h-10 rounded-full object-cover"
+        />
+      ) : (
+        <div className="w-10 h-10 bg-stone-900 rounded-full flex items-center justify-center text-white font-serif text-xl italic">
+          {initials}
+        </div>
+      )}
+      <span className="text-2xl font-serif tracking-tight font-semibold">
+        {business.trade_name}
+      </span>
+    </>
+  );
+};
+
 const Navbar = ({ activeSection, setActiveSection, onOpenAuth }: { activeSection: Section, setActiveSection: (s: Section) => void, onOpenAuth: (mode: 'login' | 'register') => void }) => {
   const [isOpen, setIsOpen] = useState(false);
   const { user, logout, isAuthenticated } = useAuth();
@@ -100,8 +132,7 @@ const Navbar = ({ activeSection, setActiveSection, onOpenAuth }: { activeSection
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-20 items-center">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveSection('home')}>
-            <div className="w-10 h-10 bg-stone-900 rounded-full flex items-center justify-center text-white font-serif text-xl italic">MC</div>
-            <span className="text-2xl font-serif tracking-tight font-semibold">MC Nails</span>
+            <BusinessMark />
           </div>
 
           {/* Desktop Nav */}
@@ -366,12 +397,22 @@ const ReviewsSection = () => (
   </section>
 );
 
-const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | null, onBack: () => void }) => {
+const BookingFlow = ({ selectedService, allServices, onBack }: {
+  selectedService: Service | null,
+  allServices: Service[],
+  onBack: () => void,
+}) => {
   const [step, setStep] = useState<1 | 2 | 3>(1);
+
+  // Servicios de la cita. Se puede reservar más de uno en la misma visita;
+  // la duración del turno es la suma de todos.
+  const [chosen, setChosen] = useState<Service[]>(selectedService ? [selectedService] : []);
+  const [showPicker, setShowPicker] = useState(false);
 
   // Step 1 — date & slot
   const [dateStr, setDateStr] = useState(''); // YYYY-MM-DD
   const [slots, setSlots] = useState<TimeSlot[]>([]);
+  const [closed, setClosed] = useState(false);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<TimeSlot | null>(null);
 
@@ -381,21 +422,40 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
   const [error, setError] = useState<string | null>(null);
 
   const todayStr = new Date().toISOString().split('T')[0];
+  const chosenIds = chosen.map(s => Number(s.id));
+  const totalPrice = chosen.reduce((sum, s) => sum + Number(s.price || 0), 0);
 
-  const handleDateChange = async (d: string) => {
-    setDateStr(d);
+  const loadSlots = async (d: string, ids: number[]) => {
     setSelectedSlot(null);
     setSlots([]);
+    setClosed(false);
     if (!d) return;
     setLoadingSlots(true);
     try {
-      const res = await fetchAvailability(d, selectedService ? Number(selectedService.id) : undefined);
+      const res = await fetchAvailability(d, ids.length ? ids : undefined);
       setSlots(res.slots);
+      setClosed(Boolean(res.closed));
     } catch {
       setSlots([]);
     } finally {
       setLoadingSlots(false);
     }
+  };
+
+  const handleDateChange = (d: string) => {
+    setDateStr(d);
+    loadSlots(d, chosenIds);
+  };
+
+  // Al cambiar los servicios cambia la duración, así que hay que volver a
+  // pedir los turnos: los que servían para 60 min pueden no servir para 150.
+  const toggleService = (service: Service) => {
+    const yaEsta = chosen.some(s => s.id === service.id);
+    const siguiente = yaEsta
+      ? chosen.filter(s => s.id !== service.id)
+      : [...chosen, service];
+    setChosen(siguiente);
+    if (dateStr) loadSlots(dateStr, siguiente.map(s => Number(s.id)));
   };
 
   const handleConfirm = async () => {
@@ -405,7 +465,7 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
     try {
       // Create appointment
       await createAppointment({
-        product: selectedService ? Number(selectedService.id) : undefined,
+        products: chosenIds,
         customer_name: form.name,
         customer_email: form.email,
         customer_phone: form.phone,
@@ -414,14 +474,14 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
       });
 
       // Also create order so it shows in admin orders
-      if (selectedService) {
+      if (chosenIds.length) {
         await createOrder({
           customer_name: form.name,
           customer_email: form.email,
           customer_phone: form.phone,
           booking_date: dateStr,
           booking_time: selectedSlot.label + ':00',
-          items: [{ product_id: Number(selectedService.id), quantity: 1 }],
+          items: chosenIds.map(id => ({ product_id: id, quantity: 1 })),
         });
       }
 
@@ -446,25 +506,33 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
           {/* Sidebar */}
           <div className="bg-stone-50 p-8 border-r border-stone-100">
             <h3 className="text-2xl font-serif mb-6">Tu Reserva</h3>
-            {selectedService ? (
+            {chosen.length > 0 ? (
               <div className="space-y-4">
                 <div className="aspect-video rounded-2xl overflow-hidden">
-                  <img src={selectedService.image} alt={selectedService.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  <img src={chosen[0].image} alt={chosen[0].name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                 </div>
                 <div>
-                  <p className="text-xs text-stone-400 uppercase tracking-widest font-bold">Servicio</p>
-                  <p className="font-serif text-lg">{selectedService.name}</p>
+                  <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-2">
+                    {chosen.length > 1 ? `Servicios (${chosen.length})` : 'Servicio'}
+                  </p>
+                  <ul className="space-y-2">
+                    {chosen.map(s => (
+                      <li key={s.id} className="flex justify-between items-start gap-2">
+                        <div className="min-w-0">
+                          <p className="font-serif text-base leading-tight truncate">{s.name}</p>
+                          <p className="text-xs text-stone-400">{s.duration}</p>
+                        </div>
+                        <span className="text-sm whitespace-nowrap">${s.price}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-                <div className="flex justify-between">
-                  <div>
-                    <p className="text-xs text-stone-400 uppercase tracking-widest font-bold">Duración</p>
-                    <p className="text-sm">{selectedService.duration}</p>
+                {chosen.length > 1 && (
+                  <div className="flex justify-between pt-3 border-t border-stone-200 font-bold">
+                    <span className="text-sm">Total</span>
+                    <span className="text-sm">${totalPrice}</span>
                   </div>
-                  <div className="text-right">
-                    <p className="text-xs text-stone-400 uppercase tracking-widest font-bold">Precio</p>
-                    <p className="text-sm font-bold">${selectedService.price}</p>
-                  </div>
-                </div>
+                )}
               </div>
             ) : (
               <p className="text-stone-400 italic text-sm">Selecciona un servicio para comenzar.</p>
@@ -484,7 +552,66 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
 
             {step === 1 && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
-                <h4 className="text-3xl font-serif mb-8">Elige una fecha</h4>
+                <h4 className="text-3xl font-serif mb-6">Elige una fecha</h4>
+
+                {/* Servicios: se puede sumar más de uno a la misma visita */}
+                <div className="mb-8">
+                  <button
+                    type="button"
+                    onClick={() => setShowPicker(v => !v)}
+                    className="w-full flex items-center justify-between p-4 rounded-2xl border border-stone-200 hover:border-stone-900 transition-colors text-left"
+                  >
+                    <span className="text-sm">
+                      {chosen.length === 0
+                        ? 'Elegir servicios'
+                        : chosen.map(s => s.name).join(' + ')}
+                    </span>
+                    <ChevronDown
+                      size={18}
+                      className={cn('transition-transform text-stone-400', showPicker && 'rotate-180')}
+                    />
+                  </button>
+
+                  {showPicker && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="mt-2 border border-stone-200 rounded-2xl divide-y divide-stone-100 overflow-hidden"
+                    >
+                      {allServices.map(s => {
+                        const activo = chosen.some(c => c.id === s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => toggleService(s)}
+                            className={cn(
+                              'w-full flex items-center justify-between gap-3 p-4 text-left transition-colors',
+                              activo ? 'bg-stone-900 text-white' : 'hover:bg-stone-50'
+                            )}
+                          >
+                            <span className="min-w-0">
+                              <span className="block text-sm truncate">{s.name}</span>
+                              <span className={cn('block text-xs', activo ? 'text-stone-300' : 'text-stone-400')}>
+                                {s.duration}
+                              </span>
+                            </span>
+                            <span className="text-sm whitespace-nowrap flex items-center gap-2">
+                              ${s.price}
+                              {activo && <CheckCircle2 size={16} />}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </motion.div>
+                  )}
+
+                  {chosen.length > 1 && (
+                    <p className="text-xs text-stone-400 mt-2">
+                      Se reservará un turno continuo para los {chosen.length} servicios.
+                    </p>
+                  )}
+                </div>
 
                 <input
                   type="date"
@@ -502,7 +629,13 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
                 )}
 
                 {!loadingSlots && dateStr && slots.length === 0 && (
-                  <p className="text-stone-400 italic text-sm mb-6">No hay horarios disponibles para esta fecha.</p>
+                  <p className="text-stone-400 italic text-sm mb-6">
+                    {closed
+                      ? 'Ese día no atendemos. Elige otra fecha.'
+                      : chosen.length > 1
+                        ? 'No hay un bloque libre suficientemente largo para esos servicios. Prueba otra fecha o reserva por separado.'
+                        : 'No hay horarios disponibles para esta fecha.'}
+                  </p>
                 )}
 
                 {slots.length > 0 && (
@@ -568,17 +701,19 @@ const BookingFlow = ({ selectedService, onBack }: { selectedService: Service | n
                 </div>
 
                 <div className="pt-6 border-t border-stone-100 mb-6">
-                  <div className="flex justify-between mb-2 text-sm">
-                    <span className="text-stone-500">Servicio</span>
-                    <span>{selectedService?.name}</span>
-                  </div>
+                  {chosen.map(s => (
+                    <div key={s.id} className="flex justify-between mb-2 text-sm">
+                      <span className="text-stone-500">{s.name}</span>
+                      <span>${s.price}</span>
+                    </div>
+                  ))}
                   <div className="flex justify-between mb-2 text-sm">
                     <span className="text-stone-500">Fecha</span>
                     <span>{dateStr} {selectedSlot?.label}</span>
                   </div>
                   <div className="flex justify-between font-bold text-lg mt-4">
                     <span>Total</span>
-                    <span>${selectedService?.price}</span>
+                    <span>${totalPrice}</span>
                   </div>
                 </div>
 
@@ -1486,13 +1621,18 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
   );
 };
 
-const Footer = () => (
+const Footer = () => {
+  const { business } = useBusiness();
+  const location = [business.address, business.city, business.country]
+    .filter(Boolean)
+    .join(', ');
+
+  return (
   <footer className="bg-stone-50 py-20 border-t border-stone-200">
     <div className="max-w-7xl mx-auto px-4 grid grid-cols-1 md:grid-cols-4 gap-12">
       <div className="md:col-span-2">
         <div className="flex items-center gap-2 mb-6">
-          <div className="w-10 h-10 bg-stone-900 rounded-full flex items-center justify-center text-white font-serif text-xl italic">MC</div>
-          <span className="text-2xl font-serif tracking-tight font-semibold">MC Nails</span>
+          <BusinessMark />
         </div>
         <p className="text-stone-500 max-w-sm mb-8">
           Elevando el estándar del cuidado de uñas con técnicas avanzadas y productos de alta gama.
@@ -1505,8 +1645,15 @@ const Footer = () => (
       <div>
         <h4 className="font-bold text-sm uppercase tracking-widest mb-6">Contacto</h4>
         <ul className="space-y-4 text-stone-500 text-sm">
-          <li className="flex items-center gap-2"><MapPin size={16} /> Calle 123 #45-67, Ciudad</li>
-          <li className="flex items-center gap-2"><Phone size={16} /> +57 300 123 4567</li>
+          {location && (
+            <li className="flex items-center gap-2"><MapPin size={16} /> {location}</li>
+          )}
+          {business.phone && (
+            <li className="flex items-center gap-2"><Phone size={16} /> {business.phone}</li>
+          )}
+          {business.email && (
+            <li className="flex items-center gap-2"><Mail size={16} /> {business.email}</li>
+          )}
           <li className="flex items-center gap-2"><Clock size={16} /> Lun - Sáb: 9am - 7pm</li>
         </ul>
       </div>
@@ -1520,10 +1667,12 @@ const Footer = () => (
       </div>
     </div>
     <div className="max-w-7xl mx-auto px-4 pt-20 text-center text-xs text-stone-400">
-      © 2026 MC Nails. Todos los derechos reservados. Diseñado con elegancia.
+      © {new Date().getFullYear()} {business.legal_name || business.trade_name}.
+      Todos los derechos reservados.
     </div>
   </footer>
-);
+  );
+};
 
 const AdminGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isAuthenticated } = useAuth();
@@ -1610,6 +1759,7 @@ function AppContent() {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
             <BookingFlow
               selectedService={selectedService}
+              allServices={services}
               onBack={() => { setActiveSection('home'); setSelectedService(null); }}
             />
           </motion.div>
@@ -1632,7 +1782,9 @@ function AppContent() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <BusinessProvider>
+        <AppContent />
+      </BusinessProvider>
     </AuthProvider>
   );
 }

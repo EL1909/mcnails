@@ -10,9 +10,14 @@ export interface AvailabilityResponse {
   date: string;
   slot_minutes: number;
   slots: TimeSlot[];
+  closed?: boolean;
+  timezone?: string;
 }
 
 export interface AppointmentPayload {
+  /** Servicios de la cita. La duración del turno es la suma de todos. */
+  products?: number[];
+  /** Compatibilidad con el flujo de un solo servicio. */
   product?: number;
   customer_name: string;
   customer_email: string;
@@ -25,7 +30,7 @@ export interface AppointmentPayload {
 
 export interface Appointment {
   id: number;
-  product: number | null;
+  services: string[];
   customer_name: string;
   customer_email: string;
   customer_phone: string;
@@ -65,10 +70,10 @@ const authHeader = (token: string) => ({ Authorization: `Bearer ${token}` });
 
 export const fetchAvailability = async (
   date: string,
-  productId?: number
+  productIds?: number[]
 ): Promise<AvailabilityResponse> => {
   const params = new URLSearchParams({ date });
-  if (productId) params.set('product_id', String(productId));
+  (productIds ?? []).forEach((id) => params.append('product_id', String(id)));
   const res = await fetch(`${API_BASE}/availability/?${params}`);
   if (!res.ok) throw new Error('Error al consultar disponibilidad');
   return res.json();
