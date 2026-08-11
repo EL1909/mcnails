@@ -17,7 +17,7 @@ from django.db.models import Count, Sum
 from evz_core.models import BusinessProfile
 from evz_store.models import Order, OrderItem
 from evz_treasury import services as treasury
-from evz_treasury.models import Direction, Transaction
+from evz_treasury.models import Transaction
 
 from .models import SCHEMA_VERSION
 
@@ -56,32 +56,36 @@ def _receipts(start, end):
     ).count()
 
 
-def _declared_margin(start, end):
+def _expense_breakdown(start, end):
     """
-    Margen declarado del período: Σ (precio − costo unitario) × cantidad.
-
-    Sale de Product.unit_cost, que es una estimación de la dueña. Por eso se
-    envía junto a la brecha de reconciliación, que revela si esa estimación
-    está calibrada.
+    Gastos del período agrupados por categoría, con su participación en el
+    total. Va como JSON libre, no como campos propios de BusinessSnapshot
+    todavía: se está evaluando la forma antes de comprometerse a un esquema
+    fijo del lado de EsfuerzoVZ (ver raw_payload, que guarda esto sin que
+    haga falta ningún cambio allá para empezar a verlo).
     """
-    items = OrderItem.objects.filter(
-        order__status__in=ORDER_STATES,
-        order__created_at__date__gte=start,
-        order__created_at__date__lte=end,
-    ).select_related('product')
-
-    total = Decimal('0.00')
-    for it in items:
-        costo = it.product.unit_cost if it.product else Decimal('0.00')
-        total += (it.price_at_purchase - costo) * it.quantity
-    return _dec(total)
+    filas = (
+        Transaction.objects.in_period(start, end).expenses()
+        .values('category__name', 'category__is_direct')
+        .annotate(amount=Sum('amount'))
+        .order_by('-amount')
+    )
+    total = sum((f['amount'] for f in filas), Decimal('0.00'))
+    return [
+        {
+            'category': f['category__name'] or 'Sin categoría',
+            'is_direct': f['category__is_direct'],
+            'amount': str(_dec(f['amount'])),
+            'pct_of_expenses': float(round(f['amount'] / total * 100, 1)) if total else 0.0,
+        }
+        for f in filas
+    ]
 
 
 def build_report(start, end):
     """Construye el payload que espera EsfuerzoVZ."""
     profile = BusinessProfile.load()
     resumen = treasury.period_summary(start, end)
-    reconciliacion = treasury.reconciliation(start, end)
 
     ventas = _sales(start, end)
     n_ordenes = ventas.count()
@@ -104,6 +108,8 @@ def build_report(start, end):
             'income': str(ingresos),
             'expenses': str(_dec(resumen['expenses'])),
         },
+        # JSON libre a propósito — ver docstring de _expense_breakdown.
+        'expense_breakdown': _expense_breakdown(start, end),
         'metrics': {
             'customers_served': clientes,
             'appointments': _appointments(start, end),
@@ -111,8 +117,6 @@ def build_report(start, end):
             'orders': n_ordenes,
             'receipts_issued': _receipts(start, end),
             'avg_ticket': str(ticket),
-            'declared_margin': str(_declared_margin(start, end)),
-            'reconciliation_gap': str(_dec(reconciliacion['gap'])),
         },
     }
 

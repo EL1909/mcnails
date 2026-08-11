@@ -1,8 +1,7 @@
-from decimal import Decimal
-
 from django.db import models
 from django.core.files.uploadedfile import UploadedFile
-from evz_core.utils import compress_image
+from evz_core.models import TeamMember
+from evz_core.utils import compress_if_image
 
 
 def product_image_path(instance, filename):
@@ -26,30 +25,14 @@ class Product(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
     price = models.DecimalField(max_digits=8, decimal_places=2)
-    unit_cost = models.DecimalField(
-        max_digits=8, decimal_places=2, default=Decimal('0.00'),
-        help_text="Costo de material estimado por servicio. Se usa para el margen."
-    )
     duration = models.CharField(max_length=50, blank=True, help_text="Ej: 60 min, 90 min")
     category = models.ForeignKey(Category, on_delete=models.CASCADE)
     image = models.ImageField(upload_to=product_image_path, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
-    @property
-    def margin(self):
-        """Ganancia por servicio, según el costo declarado."""
-        return self.price - self.unit_cost
-
-    @property
-    def margin_pct(self):
-        if not self.price:
-            return None
-        return round(self.margin / self.price * 100, 1)
-
     def save(self, *args, **kwargs):
         if self.image and isinstance(self.image.file, UploadedFile):
-            if self.image.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
-                self.image = compress_image(self.image, quality=85)
+            self.image = compress_if_image(self.image, quality=85)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -71,6 +54,12 @@ class Order(models.Model):
     booking_date = models.DateField(null=True, blank=True)
     booking_time = models.TimeField(null=True, blank=True)
     payment_method = models.CharField(max_length=50, blank=True)
+    # Quién atendió esta orden — solo para filtrar reportes, no cambia el
+    # formato de la orden en sí.
+    team_member = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='orders',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property

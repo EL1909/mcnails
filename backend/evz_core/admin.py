@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 
-from .models import BusinessProfile
+from .models import BusinessProfile, TeamMember
 
 
 @admin.register(BusinessProfile)
@@ -40,3 +40,10 @@ class BusinessProfileAdmin(admin.ModelAdmin):
         obj = BusinessProfile.load()
         url = reverse('admin:evz_core_businessprofile_change', args=[obj.pk])
         return HttpResponseRedirect(url)
+
+
+@admin.register(TeamMember)
+class TeamMemberAdmin(admin.ModelAdmin):
+    list_display = ('display_name', 'user', 'is_active')
+    list_filter = ('is_active',)
+    search_fields = ('display_name', 'user__email')

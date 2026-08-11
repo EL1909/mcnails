@@ -65,6 +65,25 @@ export const fetchUsers = async (token: string): Promise<ClientUser[]> => {
   return res.json();
 };
 
+export interface Customer {
+  id?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  order_count: number;
+  total_spent: string;
+  first_order_date: string;
+  last_order_date: string;
+}
+
+export const fetchOrderCustomers = async (token: string): Promise<Customer[]> => {
+  const res = await fetch(`/mcnails/api/store/orders/customers/`, {
+    headers: authHeaders(token),
+  });
+  if (!res.ok) throw new Error('Error al cargar clientes');
+  return res.json();
+};
+
 export const adminCreateUser = async (
   token: string,
   data: { first_name?: string; last_name?: string; email?: string; phone?: string; notes?: string }

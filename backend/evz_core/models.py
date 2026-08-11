@@ -1,13 +1,20 @@
+from django.conf import settings
 from django.core.files.uploadedfile import UploadedFile
 from django.db import models
 
-from .utils import compress_image
+from .utils import compress_if_image
 
 
 def business_logo_path(instance, filename):
     import time
     ext = filename.split('.')[-1]
     return f'business/logo_{int(time.time())}.{ext}'
+
+
+def team_member_photo_path(instance, filename):
+    import time
+    ext = filename.split('.')[-1]
+    return f'team/{instance.id or "new"}_{int(time.time())}.{ext}'
 
 
 class SingletonQuerySet(models.QuerySet):
@@ -109,8 +116,7 @@ class BusinessProfile(models.Model):
         if type(self).objects.filter(pk=1).exists():
             kwargs.pop('force_insert', None)
         if self.logo and isinstance(self.logo.file, UploadedFile):
-            if self.logo.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
-                self.logo = compress_image(self.logo, max_size=(600, 600), quality=90)
+            self.logo = compress_if_image(self.logo, max_size=(600, 600), quality=90)
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -122,3 +128,37 @@ class BusinessProfile(models.Model):
         """Devuelve la única instancia, creándola con defaults si hace falta."""
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+
+class TeamMember(models.Model):
+    """
+    Persona del equipo con agenda propia (ej. una manicurista).
+
+    Vive en evz_core, no en evz_calendars, porque es un concepto reutilizable
+    del negocio: evz_calendars, evz_store y evz_treasury pueden referenciar
+    quién atendió o vendió algo sin que evz_core (app obligatoria) dependa de
+    una app opcional.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='team_member',
+    )
+    display_name = models.CharField(max_length=150)
+    photo = models.ImageField(upload_to=team_member_photo_path, null=True, blank=True)
+    bio = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Miembro del equipo"
+        verbose_name_plural = "Miembros del equipo"
+        ordering = ('display_name',)
+
+    def __str__(self):
+        return self.display_name
+
+    def save(self, *args, **kwargs):
+        if self.photo and isinstance(self.photo.file, UploadedFile):
+            self.photo = compress_if_image(self.photo, max_size=(600, 600), quality=85)
+        super().save(*args, **kwargs)

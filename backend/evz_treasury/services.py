@@ -10,8 +10,7 @@ import datetime
 from decimal import Decimal
 
 from django.db.models import Sum
-
-from evz_store.models import OrderItem, Product
+from django.db.models.functions import TruncMonth
 
 from .models import Direction, Transaction
 
@@ -74,60 +73,55 @@ def period_summary(start, end):
     }
 
 
-def reconciliation(start, end):
+def yearly_summary(year):
     """
-    Compara el costo de material DECLARADO contra el gasto REAL del período.
+    Ingresos y gastos mes a mes de un año completo, para el reporte anual.
 
-    El margen que ve un inversionista sale de Product.unit_cost, que es una
-    estimación de la dueña. Esto revela si esa estimación está calibrada:
-    si el gasto real supera al declarado, los márgenes están inflados.
+    Una sola consulta agrupada por mes en vez de doce llamadas a
+    period_summary — evita 12 round-trips por cada carga del reporte.
     """
-    units = (
-        OrderItem.objects
-        .filter(
-            order__status__in=('confirmed', 'completed'),
-            order__created_at__date__gte=start,
-            order__created_at__date__lte=end,
+    por_mes = {
+        row['month'].month: row
+        for row in (
+            Transaction.objects
+            .filter(date__year=year, direction=Direction.IN)
+            .annotate(month=TruncMonth('date'))
+            .values('month')
+            .annotate(total=Sum('amount'))
         )
-        .values('product')
-        .annotate(qty=Sum('quantity'))
-    )
+    }
+    gastos_por_mes = {
+        row['month'].month: row
+        for row in (
+            Transaction.objects
+            .filter(date__year=year, direction=Direction.OUT)
+            .annotate(month=TruncMonth('date'))
+            .values('month')
+            .annotate(total=Sum('amount'))
+        )
+    }
 
-    costs = {p.id: p.unit_cost for p in Product.objects.all()}
-    declared = sum(
-        (costs.get(row['product'], Decimal('0.00')) * row['qty'] for row in units),
-        Decimal('0.00'),
-    )
+    meses = []
+    total_income = Decimal('0.00')
+    total_expenses = Decimal('0.00')
+    for m in range(1, 13):
+        income = por_mes.get(m, {}).get('total') or Decimal('0.00')
+        expenses = gastos_por_mes.get(m, {}).get('total') or Decimal('0.00')
+        total_income += income
+        total_expenses += expenses
+        meses.append({
+            'month': m,
+            'income': income,
+            'expenses': expenses,
+            'balance': income - expenses,
+        })
 
-    real = (
-        Transaction.objects
-        .in_period(start, end)
-        .expenses()
-        .filter(category__is_direct=True)
-        .total()
-    )
-
-    gap = real - declared
     return {
-        'declared_cost': declared,
-        'real_direct_cost': real,
-        'gap': gap,
-        # Positivo = se gastó más de lo declarado → los márgenes están inflados.
-        'declared_is_understated': gap > 0,
-        'units_sold': sum(row['qty'] for row in units),
+        'year': year,
+        'months': meses,
+        'total_income': total_income,
+        'total_expenses': total_expenses,
+        'total_balance': total_income - total_expenses,
     }
 
 
-def margins():
-    """Margen por servicio, según el costo declarado."""
-    return [
-        {
-            'product_id': p.id,
-            'name': p.name,
-            'price': p.price,
-            'unit_cost': p.unit_cost,
-            'margin': p.margin,
-            'margin_pct': p.margin_pct,
-        }
-        for p in Product.objects.filter(is_active=True).order_by('name')
-    ]

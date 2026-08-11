@@ -19,7 +19,7 @@ MCnails/
 ├── backend/
 │   ├── evz_core/       # [backbone] utilidades compartidas
 │   ├── evz_store/      # [backbone] servicios (productos) y órdenes
-│   ├── evz_treasury/   # [backbone] ingresos, costos, abonos y márgenes
+│   ├── evz_treasury/   # [backbone] ingresos, gastos y abonos
 │   ├── evz_billing/    # [backbone, opcional] cotizaciones y recibos
 │   ├── evz_calendars/  # [backbone, opcional] citas, horarios y bloqueos
 │   ├── accounts/       # propia del cliente: usuarios y autenticación
@@ -50,11 +50,13 @@ simplemente no instala `evz_calendars`.
 | PATCH | `/api/accounts/users/<id>/` | Editar cliente (admin) |
 | POST | `/api/accounts/users/create/` | Crear cliente manual (admin) |
 | GET | `/api/store/products/` | Catálogo de servicios |
+| GET/POST | `/api/store/orders/` | Órdenes — crear es público; listar/editar, admin |
+| PATCH | `/api/store/orders/<id>/` | Editar orden, ej. cerrarla (`status: completed`) |
+| GET | `/api/store/orders/customers/` | Clientes únicos derivados de las órdenes (admin) |
 | GET/POST | `/api/treasury/transactions/` | Ingresos y gastos (admin) |
 | GET/POST | `/api/treasury/categories/` | Categorías de gasto (admin) |
-| GET | `/api/treasury/summary/` | Ingresos, gastos y balance del período |
-| GET | `/api/treasury/reconciliation/` | Costo declarado vs. gasto real |
-| GET | `/api/treasury/margins/` | Margen por servicio |
+| GET | `/api/treasury/summary/` | Ingresos, gastos y balance de un período (`?start=&end=`) |
+| GET | `/api/treasury/summary/yearly/` | Desglose mes a mes de un año (`?year=`) |
 | GET/POST | `/api/treasury/orders/<id>/payments/` | Abonos y saldo de una orden |
 | GET | `/api/billing/fiscal/` | Reglas fiscales del país configurado |
 | GET/POST | `/api/billing/quotations/` | Cotizaciones |
@@ -65,8 +67,9 @@ simplemente no instala `evz_calendars`.
 | GET | `/api/calendars/availability/` | Turnos libres (acepta varios `product_id`) |
 | GET/POST | `/api/calendars/schedule/` | Horario por día de la semana |
 | GET/POST | `/api/calendars/blocks/` | Bloqueos: vacaciones, feriados |
-| GET/POST | `/api/calendars/appointments/` | Citas |
+| GET/POST | `/api/calendars/appointments/` | Citas — al crear con servicios, genera su Order automáticamente |
 | PATCH/DELETE | `/api/calendars/appointments/<id>/` | Gestionar cita (admin) |
+| GET | `/api/calendars/appointments/billing/` | Citas de un rango con su estado de pago (`?start=&end=`, admin) |
 
 ## Setup — Backend
 

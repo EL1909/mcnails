@@ -63,30 +63,17 @@ class SummaryView(APIView):
         return Response(services.period_summary(start, end))
 
 
-class ReconciliationView(APIView):
-    """
-    GET /api/treasury/reconciliation/?start=&end=
-
-    Costo declarado (Product.unit_cost × unidades vendidas) contra gasto
-    directo real. Si difieren mucho, los márgenes están mal calibrados.
-    """
+class YearlySummaryView(APIView):
+    """GET /api/treasury/summary/yearly/?year=YYYY — desglose mes a mes."""
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        start, end, err = _period(request)
-        if err:
-            return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
-        data = services.reconciliation(start, end)
-        data.update({'start': start, 'end': end})
-        return Response(data)
-
-
-class MarginsView(APIView):
-    """GET /api/treasury/margins/ — margen por servicio."""
-    permission_classes = [IsAdminUser]
-
-    def get(self, request):
-        return Response(services.margins())
+        year_str = request.query_params.get('year')
+        try:
+            year = int(year_str) if year_str else datetime.date.today().year
+        except ValueError:
+            return Response({'error': 'Año inválido.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(services.yearly_summary(year))
 
 
 class OrderPaymentsView(APIView):

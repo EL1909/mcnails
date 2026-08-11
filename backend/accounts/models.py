@@ -2,7 +2,7 @@ from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.core.files.uploadedfile import UploadedFile
-from evz_core.utils import compress_image
+from evz_core.utils import compress_if_image
 import uuid
 import time
 
@@ -55,8 +55,7 @@ class Profile(models.Model):
 
     def save(self, *args, **kwargs):
         if self.profile_picture and isinstance(self.profile_picture.file, UploadedFile):
-            if self.profile_picture.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp')):
-                self.profile_picture = compress_image(self.profile_picture, quality=85)
+            self.profile_picture = compress_if_image(self.profile_picture, quality=85)
         super().save(*args, **kwargs)
 
     def __str__(self):

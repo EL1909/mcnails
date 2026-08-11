@@ -5,6 +5,7 @@ import {
   Image as ImageIcon,
   Star,
   User,
+  Users,
   ChevronRight,
   ChevronDown,
   Instagram,
@@ -21,19 +22,37 @@ import {
   Plus,
   LogOut,
   KeyRound,
+  Loader,
+  AlertCircle,
+  Send,
+  CheckSquare,
+  Trash2,
+  Filter,
+  FileText,
+  Upload,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
-import { fetchProducts, fetchAdminProducts, fetchAdminCategories, createProduct, updateProduct, deleteProduct, createCategory, createOrder, type Product, type Category } from './api/store';
-import { fetchUsers, adminCreateUser, adminUpdateUser, type ClientUser } from './api/auth';
-import { fetchAvailability, createAppointment, createAppointmentAdmin, fetchAppointments, updateAppointment, deleteAppointment, type AppointmentPayload, type TimeSlot, type CalendarEvent } from './api/calendar';
+import { fetchProducts, fetchAdminProducts, fetchAdminCategories, createProduct, updateProduct, deleteProduct, createCategory, fetchOrders, updateOrderStatus, type Product, type Category, type Order } from './api/store';
+import { fetchUsers, adminCreateUser, adminUpdateUser, fetchOrderCustomers, type ClientUser, type Customer } from './api/auth';
+import { fetchAvailability, createAppointment, createAppointmentAdmin, fetchAppointments, fetchAppointmentsBilling, updateAppointment, deleteAppointment, fetchWeeklySchedule, saveWeeklyScheduleDay, fetchTimeBlocks, createTimeBlock, deleteTimeBlock, type AppointmentPayload, type TimeSlot, type CalendarEvent, type AppointmentBilling, type WeeklySchedule, type TimeBlock } from './api/calendar';
+import { fetchTeamMembers, fetchMyTeamMember, fetchAllTeamMembers, createTeamMember, updateTeamMember, type TeamMemberPublic, type TeamMemberAdmin } from './api/business';
+import { fetchBillingCounts, fetchReceipts, voidReceipt, issueReceipt } from './api/billing';
+import { fetchMonthlyStats, fetchTransactions, syncToEVZ, createTransaction, fetchExpenseCategories, createExpenseCategory, updateTransactionCategory, recordOrderPayment, fetchYearlySummary, type ExpenseCategory, type Transaction, type YearlySummaryData } from './api/treasury';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
 import listPlugin from '@fullcalendar/list';
+import interactionPlugin from '@fullcalendar/interaction';
+import momentTimezonePlugin from '@fullcalendar/moment-timezone';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { BusinessProvider, useBusiness } from './context/BusinessContext';
 import { AuthModal } from './components/AuthModal';
+
+// Offset fijo del negocio (America/Caracas, UTC-4 sin DST). Se usa para
+// construir timestamps con hora local del negocio sin depender de la zona
+// horaria del navegador de quien administra el panel.
+const BUSINESS_TZ_OFFSET = '-04:00';
 
 // --- Types ---
 type Section = 'home' | 'services' | 'gallery' | 'reviews' | 'admin' | 'booking';
@@ -402,12 +421,24 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
   allServices: Service[],
   onBack: () => void,
 }) => {
+  const { user: loggedInUser } = useAuth();
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
   // Servicios de la cita. Se puede reservar más de uno en la misma visita;
   // la duración del turno es la suma de todos.
   const [chosen, setChosen] = useState<Service[]>(selectedService ? [selectedService] : []);
   const [showPicker, setShowPicker] = useState(false);
+
+  // Con quién reservar: por defecto "cualquiera disponible"; la clienta
+  // puede en cambio elegir a alguien del equipo por nombre.
+  const [teamMembers, setTeamMembers] = useState<TeamMemberPublic[]>([]);
+  const [bookingMode, setBookingMode] = useState<'any' | 'choose'>('any');
+  const [selectedTeamMember, setSelectedTeamMember] = useState<TeamMemberPublic | null>(null);
+  const [assignedTeamMemberName, setAssignedTeamMemberName] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchTeamMembers().then(setTeamMembers).catch(() => setTeamMembers([]));
+  }, []);
 
   // Step 1 — date & slot
   const [dateStr, setDateStr] = useState(''); // YYYY-MM-DD
@@ -421,18 +452,30 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Precarga los datos de quien está logueada — sigue siendo editable, por
+  // si reserva a nombre de otra persona.
+  useEffect(() => {
+    if (loggedInUser && !form.name && !form.email) {
+      setForm({
+        name: `${loggedInUser.first_name} ${loggedInUser.last_name}`.trim(),
+        email: loggedInUser.email || '',
+        phone: loggedInUser.profile?.phone || '',
+      });
+    }
+  }, [loggedInUser]);
+
   const todayStr = new Date().toISOString().split('T')[0];
   const chosenIds = chosen.map(s => Number(s.id));
   const totalPrice = chosen.reduce((sum, s) => sum + Number(s.price || 0), 0);
 
-  const loadSlots = async (d: string, ids: number[]) => {
+  const loadSlots = async (d: string, ids: number[], teamMemberId?: number) => {
     setSelectedSlot(null);
     setSlots([]);
     setClosed(false);
     if (!d) return;
     setLoadingSlots(true);
     try {
-      const res = await fetchAvailability(d, ids.length ? ids : undefined);
+      const res = await fetchAvailability(d, ids.length ? ids : undefined, teamMemberId);
       setSlots(res.slots);
       setClosed(Boolean(res.closed));
     } catch {
@@ -444,7 +487,7 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
 
   const handleDateChange = (d: string) => {
     setDateStr(d);
-    loadSlots(d, chosenIds);
+    loadSlots(d, chosenIds, selectedTeamMember?.id);
   };
 
   // Al cambiar los servicios cambia la duración, así que hay que volver a
@@ -455,7 +498,20 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
       ? chosen.filter(s => s.id !== service.id)
       : [...chosen, service];
     setChosen(siguiente);
-    if (dateStr) loadSlots(dateStr, siguiente.map(s => Number(s.id)));
+    if (dateStr) loadSlots(dateStr, siguiente.map(s => Number(s.id)), selectedTeamMember?.id);
+  };
+
+  const handleBookingModeChange = (mode: 'any' | 'choose') => {
+    setBookingMode(mode);
+    if (mode === 'any') {
+      setSelectedTeamMember(null);
+      if (dateStr) loadSlots(dateStr, chosenIds, undefined);
+    }
+  };
+
+  const handleSelectTeamMember = (tm: TeamMemberPublic) => {
+    setSelectedTeamMember(tm);
+    if (dateStr) loadSlots(dateStr, chosenIds, tm.id);
   };
 
   const handleConfirm = async () => {
@@ -463,27 +519,22 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
     setSubmitting(true);
     setError(null);
     try {
-      // Create appointment
-      await createAppointment({
+      // El backend crea la Order asociada automáticamente cuando la cita
+      // trae servicios, así queda disponible para cobro y facturación.
+      const appt = await createAppointment({
         products: chosenIds,
         customer_name: form.name,
         customer_email: form.email,
         customer_phone: form.phone,
         start_time: selectedSlot.start,
         end_time: selectedSlot.end,
+        ...(selectedTeamMember ? { team_member: selectedTeamMember.id } : {}),
       });
 
-      // Also create order so it shows in admin orders
-      if (chosenIds.length) {
-        await createOrder({
-          customer_name: form.name,
-          customer_email: form.email,
-          customer_phone: form.phone,
-          booking_date: dateStr,
-          booking_time: selectedSlot.label + ':00',
-          items: chosenIds.map(id => ({ product_id: id, quantity: 1 })),
-        });
-      }
+      // En modo "cualquiera disponible" recién se sabe quién quedó asignada
+      // al confirmar — se muestra en la pantalla de éxito, no antes.
+      const asignada = teamMembers.find(tm => tm.id === appt.team_member);
+      setAssignedTeamMemberName(asignada?.display_name ?? selectedTeamMember?.display_name ?? null);
 
       setStep(3);
     } catch (err: any) {
@@ -613,6 +664,67 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
                   )}
                 </div>
 
+                {/* Con quién reservar — solo tiene sentido elegir si hay más
+                    de una persona en el equipo. */}
+                {teamMembers.length > 1 && (
+                  <div className="mb-8">
+                    <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-3">
+                      ¿Cómo prefieres reservar?
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <button
+                        type="button"
+                        onClick={() => handleBookingModeChange('any')}
+                        className={cn(
+                          'p-4 rounded-2xl border text-left transition-colors',
+                          bookingMode === 'any' ? 'border-stone-900 bg-stone-900 text-white' : 'border-stone-200 hover:border-stone-900'
+                        )}
+                      >
+                        <span className="block text-sm font-medium">Cualquiera disponible</span>
+                        <span className={cn('block text-xs mt-0.5', bookingMode === 'any' ? 'text-stone-300' : 'text-stone-400')}>
+                          Te asignamos a quien tenga cupo
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBookingModeChange('choose')}
+                        className={cn(
+                          'p-4 rounded-2xl border text-left transition-colors',
+                          bookingMode === 'choose' ? 'border-stone-900 bg-stone-900 text-white' : 'border-stone-200 hover:border-stone-900'
+                        )}
+                      >
+                        <span className="block text-sm font-medium">Elegir por nombre</span>
+                        <span className={cn('block text-xs mt-0.5', bookingMode === 'choose' ? 'text-stone-300' : 'text-stone-400')}>
+                          Reserva con alguien específico
+                        </span>
+                      </button>
+                    </div>
+
+                    {bookingMode === 'choose' && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {teamMembers.map(tm => (
+                          <button
+                            key={tm.id}
+                            type="button"
+                            onClick={() => handleSelectTeamMember(tm)}
+                            className={cn(
+                              'p-3 rounded-2xl border text-center transition-colors',
+                              selectedTeamMember?.id === tm.id ? 'border-stone-900 bg-stone-50' : 'border-stone-200 hover:border-stone-900'
+                            )}
+                          >
+                            <div className="w-16 h-16 rounded-full overflow-hidden bg-stone-100 mx-auto mb-2">
+                              {tm.photo && (
+                                <img src={tm.photo} alt={tm.display_name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              )}
+                            </div>
+                            <span className="block text-xs font-medium truncate">{tm.display_name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <input
                   type="date"
                   min={todayStr}
@@ -661,7 +773,7 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
                 )}
 
                 <button
-                  disabled={!selectedSlot}
+                  disabled={!selectedSlot || (bookingMode === 'choose' && !selectedTeamMember)}
                   onClick={() => setStep(2)}
                   className="w-full bg-stone-900 text-white py-4 rounded-2xl font-bold disabled:opacity-50 disabled:cursor-not-allowed shadow-xl shadow-stone-200"
                 >
@@ -711,6 +823,12 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
                     <span className="text-stone-500">Fecha</span>
                     <span>{dateStr} {selectedSlot?.label}</span>
                   </div>
+                  {selectedTeamMember && (
+                    <div className="flex justify-between mb-2 text-sm">
+                      <span className="text-stone-500">Con</span>
+                      <span>{selectedTeamMember.display_name}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between font-bold text-lg mt-4">
                     <span>Total</span>
                     <span>${totalPrice}</span>
@@ -752,6 +870,9 @@ const BookingFlow = ({ selectedService, allServices, onBack }: {
                 <p className="text-stone-500 mb-2">
                   <span className="font-medium">{dateStr}</span> a las <span className="font-medium">{selectedSlot?.label}</span>
                 </p>
+                {assignedTeamMemberName && (
+                  <p className="text-stone-500 mb-2">Te atenderá <span className="font-medium">{assignedTeamMemberName}</span></p>
+                )}
                 <p className="text-stone-400 text-sm mb-8">Recibirás un correo con los detalles de tu reserva.</p>
                 <button onClick={onBack} className="bg-stone-900 text-white px-8 py-4 rounded-2xl font-bold">
                   Volver al Inicio
@@ -867,39 +988,71 @@ const ServiceForm = ({
   );
 };
 
-const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
-  const { token } = useAuth();
+const AppointmentsCalendar = ({ products, customers, onCustomerSaved, onAppointmentsChanged }: { products: Product[]; customers: Customer[]; onCustomerSaved?: () => void; onAppointmentsChanged?: () => void }) => {
+  const { token, user } = useAuth();
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [panel, setPanel] = useState<'detail' | 'new'>('detail');
 
+  // Con quién: la dueña (superuser) ve/filtra el equipo completo; cada
+  // team_member ve automáticamente solo lo suyo (el backend ya la aísla) y
+  // no necesita elegir nada.
+  const [myTeamMember, setMyTeamMember] = useState<TeamMemberAdmin | null>(null);
+  const [teamRoster, setTeamRoster] = useState<TeamMemberAdmin[]>([]);
+  const [viewTeamMemberId, setViewTeamMemberId] = useState<number | undefined>(undefined);
+
   // New appointment form state
-  const emptyForm = { customer_name: '', customer_email: '', customer_phone: '', product: '', date: '', start_time: '', end_time: '', notes: '', status: 'confirmed' };
+  const emptyForm = { customer_name: '', customer_email: '', customer_phone: '', product: '', date: '', start_time: '', end_time: '', notes: '', status: 'confirmed', team_member: '' };
   const [newForm, setNewForm] = useState(emptyForm);
   const [newError, setNewError] = useState<string | null>(null);
   const [savingNew, setSavingNew] = useState(false);
+  const [showCustomerSuggestions, setShowCustomerSuggestions] = useState(false);
+
+  const customerSuggestions = newForm.customer_name.trim().length > 0
+    ? customers.filter(c => c.name.toLowerCase().includes(newForm.customer_name.trim().toLowerCase())).slice(0, 6)
+    : [];
+
+  const selectCustomer = (c: Customer) => {
+    setNewForm(prev => ({
+      ...prev,
+      customer_name: c.name,
+      customer_email: c.email || prev.customer_email,
+      customer_phone: c.phone || prev.customer_phone,
+    }));
+    setShowCustomerSuggestions(false);
+  };
 
   const reload = () => {
     if (!token) return;
-    fetchAppointments(token).then(setEvents).catch(console.error);
+    fetchAppointments(token, viewTeamMemberId).then(setEvents).catch(console.error);
   };
 
   useEffect(() => {
     if (!token) return;
-    fetchAppointments(token)
+    setLoading(true);
+    fetchAppointments(token, viewTeamMemberId)
       .then(setEvents)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [token]);
+  }, [token, viewTeamMemberId]);
+
+  useEffect(() => {
+    if (!token) return;
+    fetchMyTeamMember(token).then(setMyTeamMember).catch(() => setMyTeamMember(null));
+    if (user?.is_superuser) {
+      fetchAllTeamMembers(token).then(setTeamRoster).catch(() => setTeamRoster([]));
+    }
+  }, [token, user?.is_superuser]);
 
   const handleStatusChange = async (newStatus: string) => {
     if (!selectedEvent || !token) return;
     try {
       await updateAppointment(token, selectedEvent.id, { status: newStatus });
-      const updated = await fetchAppointments(token);
+      const updated = await fetchAppointments(token, viewTeamMemberId);
       setEvents(updated);
       setSelectedEvent(prev => prev ? { ...prev, extendedProps: { ...prev.extendedProps, status: newStatus } } : null);
+      onAppointmentsChanged?.();
     } catch (err) { console.error(err); }
   };
 
@@ -909,6 +1062,7 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
       await deleteAppointment(token, selectedEvent.id);
       setEvents(prev => prev.filter(e => e.id !== selectedEvent.id));
       setSelectedEvent(null);
+      onAppointmentsChanged?.();
     } catch (err) { console.error(err); }
   };
 
@@ -918,8 +1072,18 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
     setNewError(null);
     setSavingNew(true);
     try {
-      const startISO = new Date(`${newForm.date}T${newForm.start_time}`).toISOString();
-      const endISO = new Date(`${newForm.date}T${newForm.end_time}`).toISOString();
+      // El horario de atención se valida en hora del negocio (America/Caracas,
+      // UTC-4 fijo, sin DST). Si se interpreta con new Date() se usa la zona
+      // horaria del navegador, que puede diferir y desplazar la hora fuera
+      // del rango de atención al convertir a UTC.
+      const startISO = `${newForm.date}T${newForm.start_time}:00${BUSINESS_TZ_OFFSET}`;
+      const endISO = `${newForm.date}T${newForm.end_time}:00${BUSINESS_TZ_OFFSET}`;
+      // Una team_member (no superuser) siempre agenda para sí misma, aunque
+      // no haya picker en pantalla; la dueña elige o deja "cualquiera".
+      const teamMemberId = !user?.is_superuser
+        ? myTeamMember?.id
+        : (newForm.team_member ? Number(newForm.team_member) : undefined);
+
       const payload: AppointmentPayload = {
         customer_name: newForm.customer_name,
         customer_email: newForm.customer_email,
@@ -928,10 +1092,13 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
         end_time: endISO,
         notes: newForm.notes,
         ...(newForm.product ? { product: Number(newForm.product) } : {}),
+        ...(teamMemberId ? { team_member: teamMemberId } : {}),
       };
       await createAppointmentAdmin(token, payload);
       // also set status if not pending
       reload();
+      onCustomerSaved?.();
+      onAppointmentsChanged?.();
       setNewForm(emptyForm);
       setPanel('detail');
     } catch (err: any) {
@@ -958,13 +1125,44 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <style>{`
+        .fc .fc-daygrid-day:hover,
+        .fc .fc-timegrid-slot:hover,
+        .fc .fc-col-time-frame:hover {
+          background-color: rgba(16, 185, 129, 0.05) !important;
+          cursor: pointer !important;
+        }
+        .fc .fc-timegrid-slot {
+          cursor: pointer;
+        }
+        .fc .fc-daygrid-day {
+          cursor: pointer;
+        }
+      `}</style>
+
       {/* Calendar */}
       <div className="lg:col-span-2 bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-6">
+        {user?.is_superuser && teamRoster.length > 1 && (
+          <div className="flex items-center gap-2 mb-4">
+            <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Ver agenda de</p>
+            <select
+              value={viewTeamMemberId ?? ''}
+              onChange={e => setViewTeamMemberId(e.target.value ? Number(e.target.value) : undefined)}
+              className="px-3 py-1.5 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+            >
+              <option value="">Todas</option>
+              {teamRoster.map(tm => (
+                <option key={tm.id} value={tm.id}>{tm.display_name}</option>
+              ))}
+            </select>
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center h-64 text-stone-400">Cargando citas…</div>
         ) : (
           <FullCalendar
-            plugins={[dayGridPlugin, timeGridPlugin, listPlugin]}
+            plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin, momentTimezonePlugin]}
+            timeZone="America/Caracas"
             initialView="timeGridWeek"
             headerToolbar={{
               left: 'prev,next today',
@@ -978,11 +1176,45 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
               const ev = events.find(e => String(e.id) === info.event.id);
               if (ev) { setSelectedEvent(ev); setPanel('detail'); }
             }}
+            dateClick={info => {
+              // info.dateStr ya viene formateado en la zona del calendario
+              // (America/Caracas vía el prop timeZone), no en la del
+              // navegador — por eso se parsea el string, nunca info.date
+              // con getHours()/getMinutes(), que reflejarían la hora local
+              // de quien esté administrando el panel.
+              const date = info.dateStr.slice(0, 10);
+              const hasTime = info.dateStr.length > 10;
+              const startTime = hasTime ? info.dateStr.slice(11, 16) : '10:00';
+              const endTime = hasTime
+                ? `${String(Number(info.dateStr.slice(11, 13)) + 1).padStart(2, '0')}:${info.dateStr.slice(14, 16)}`
+                : '11:00';
+              setNewForm(prev => ({ ...prev, date, start_time: startTime, end_time: endTime }));
+              setPanel('new');
+            }}
+            select={info => {
+              // Igual que dateClick: usar startStr/endStr (ya en hora de
+              // Caracas) en vez de info.start/info.end, que son Date en
+              // hora local del navegador.
+              const date = info.startStr.slice(0, 10);
+              const startTime = info.startStr.slice(11, 16);
+              const endTime = info.endStr.slice(11, 16);
+              setNewForm(prev => ({ ...prev, date, start_time: startTime, end_time: endTime }));
+              setPanel('new');
+            }}
+            selectable={true}
+            selectMinDistance={0}
+            slotLabelInterval="00:30:00"
+            slotLabelFormat={{ meridiem: 'short', hour: '2-digit', minute: '2-digit' }}
             slotMinTime="07:00:00"
             slotMaxTime="23:00:00"
             scrollTime="07:00:00"
             height="60vh"
             stickyHeaderDates
+            editable={false}
+            validRange={{
+              start: new Date(new Date().getFullYear(), new Date().getMonth() - 2, 1),
+              end: new Date(new Date().getFullYear(), new Date().getMonth() + 3, 1),
+            }}
           />
         )}
       </div>
@@ -1007,12 +1239,50 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
 
         {panel === 'new' ? (
           <form onSubmit={handleCreateAppointment} className="space-y-3">
-            <h3 className="text-lg font-serif mb-1">Nueva Cita</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-serif">Nueva Cita</h3>
+              {newForm.date && (
+                <span className="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-medium">
+                  {new Date(newForm.date).toLocaleDateString('es-ES', { weekday: 'short', day: '2-digit', month: 'short' })} {newForm.start_time}
+                </span>
+              )}
+            </div>
             {newError && <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{newError}</p>}
 
-            <div>
+            <div className="relative">
               <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Nombre cliente *</p>
-              <input required className={iClass} placeholder="Nombre completo" value={newForm.customer_name} onChange={setF('customer_name')} />
+              <input
+                required
+                className={iClass}
+                placeholder="Nombre completo"
+                value={newForm.customer_name}
+                onChange={e => { setF('customer_name')(e); setShowCustomerSuggestions(true); }}
+                onFocus={() => setShowCustomerSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowCustomerSuggestions(false), 150)}
+                autoComplete="off"
+              />
+              {showCustomerSuggestions && customerSuggestions.length > 0 && (
+                <div className="absolute z-10 mt-1 w-full bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden max-h-48 overflow-y-auto">
+                  {customerSuggestions.map((c, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onMouseDown={() => selectCustomer(c)}
+                      className="w-full text-left px-3 py-2 hover:bg-stone-50 transition-colors flex flex-col gap-0.5 border-b border-stone-50 last:border-0"
+                    >
+                      <span className="text-sm font-medium text-stone-900">{c.name}</span>
+                      {(c.email || c.phone) && (
+                        <span className="text-xs text-stone-400">{[c.email, c.phone].filter(Boolean).join(' · ')}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {newForm.customer_name.trim().length > 0 && customerSuggestions.length === 0 && showCustomerSuggestions && (
+                <div className="absolute z-10 mt-1 w-full bg-white border border-stone-200 rounded-xl shadow-lg px-3 py-2">
+                  <span className="text-xs text-stone-400">Cliente nuevo — se creará al guardar</span>
+                </div>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
@@ -1033,6 +1303,17 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
                 ))}
               </select>
             </div>
+            {user?.is_superuser && (
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Con</p>
+                <select className={iClass} value={newForm.team_member} onChange={setF('team_member')}>
+                  <option value="">Cualquiera disponible</option>
+                  {teamRoster.filter(tm => tm.is_active).map(tm => (
+                    <option key={tm.id} value={tm.id}>{tm.display_name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Fecha *</p>
               <input required type="date" className={iClass} value={newForm.date} onChange={setF('date')} />
@@ -1093,6 +1374,12 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
                 <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-0.5">Cliente</p>
                 <p className="font-medium">{selectedEvent.title}</p>
               </div>
+              {selectedEvent.extendedProps.team_member_name && (
+                <div>
+                  <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-0.5">Atiende</p>
+                  <p>{selectedEvent.extendedProps.team_member_name}</p>
+                </div>
+              )}
               {selectedEvent.extendedProps.customer_email && (
                 <div>
                   <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-0.5">Email</p>
@@ -1107,11 +1394,11 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
               )}
               <div>
                 <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-0.5">Inicio</p>
-                <p>{new Date(selectedEvent.start).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                <p>{new Date(selectedEvent.start).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Caracas' })}</p>
               </div>
               <div>
                 <p className="text-xs text-stone-400 uppercase tracking-widest font-bold mb-0.5">Fin</p>
-                <p>{new Date(selectedEvent.end).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                <p>{new Date(selectedEvent.end).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Caracas' })}</p>
               </div>
               {selectedEvent.extendedProps.notes && (
                 <div>
@@ -1150,14 +1437,311 @@ const AppointmentsCalendar = ({ products }: { products: Product[] }) => {
   );
 };
 
-const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }) => {
+const WEEKDAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+
+const DayScheduleRow = ({ label, day, saving, onSave }: {
+  label: string;
+  day?: WeeklySchedule;
+  saving: boolean;
+  onSave: (data: { is_open: boolean; opens_at: string; closes_at: string }) => void;
+}) => {
+  const [isOpen, setIsOpen] = useState(day?.is_open ?? true);
+  const [opensAt, setOpensAt] = useState(day?.opens_at?.slice(0, 5) ?? '09:00');
+  const [closesAt, setClosesAt] = useState(day?.closes_at?.slice(0, 5) ?? '19:00');
+
+  useEffect(() => {
+    setIsOpen(day?.is_open ?? true);
+    setOpensAt(day?.opens_at?.slice(0, 5) ?? '09:00');
+    setClosesAt(day?.closes_at?.slice(0, 5) ?? '19:00');
+  }, [day?.id]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl border border-stone-100">
+      <span className="w-24 text-sm font-medium shrink-0">{label}</span>
+      <label className="flex items-center gap-1.5 text-xs text-stone-500 shrink-0">
+        <input type="checkbox" checked={isOpen} onChange={e => setIsOpen(e.target.checked)} className="rounded" />
+        Abierto
+      </label>
+      <input type="time" disabled={!isOpen} value={opensAt} onChange={e => setOpensAt(e.target.value)} className="px-2 py-1 rounded-lg border border-stone-200 text-sm disabled:opacity-40" />
+      <span className="text-stone-300">—</span>
+      <input type="time" disabled={!isOpen} value={closesAt} onChange={e => setClosesAt(e.target.value)} className="px-2 py-1 rounded-lg border border-stone-200 text-sm disabled:opacity-40" />
+      <button
+        disabled={saving}
+        onClick={() => onSave({ is_open: isOpen, opens_at: opensAt, closes_at: closesAt })}
+        className="ml-auto text-xs bg-stone-900 text-white px-3 py-1.5 rounded-lg hover:bg-stone-800 disabled:opacity-50"
+      >
+        {saving ? '…' : 'Guardar'}
+      </button>
+    </div>
+  );
+};
+
+const TeamManagement = ({ teamRoster, onRosterChanged }: { teamRoster: TeamMemberAdmin[]; onRosterChanged: () => void }) => {
   const { token } = useAuth();
-  const [adminTab, setAdminTab] = useState<'services' | 'calendar' | 'users' | 'billing'>('services');
+  const [showNew, setShowNew] = useState(false);
+  const [newForm, setNewForm] = useState({ email: '', password: '', display_name: '', bio: '' });
+  const [newPhoto, setNewPhoto] = useState<File | null>(null);
+  const [savingNew, setSavingNew] = useState(false);
+  const [newError, setNewError] = useState<string | null>(null);
+
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const selected = teamRoster.find(t => t.id === selectedId) || null;
+
+  const [schedule, setSchedule] = useState<WeeklySchedule[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [savingDay, setSavingDay] = useState<number | null>(null);
+
+  const [blocks, setBlocks] = useState<TimeBlock[]>([]);
+  const [showNewBlock, setShowNewBlock] = useState(false);
+  const [newBlock, setNewBlock] = useState({ start: '', end: '', reason: 'vacation', note: '' });
+  const [savingBlock, setSavingBlock] = useState(false);
+  const [blockError, setBlockError] = useState<string | null>(null);
+
+  const loadScheduleAndBlocks = (id: number) => {
+    if (!token) return;
+    setScheduleLoading(true);
+    Promise.all([fetchWeeklySchedule(token, id), fetchTimeBlocks(token, id)])
+      .then(([s, b]) => { setSchedule(s); setBlocks(b); })
+      .catch(console.error)
+      .finally(() => setScheduleLoading(false));
+  };
+
+  const handleSelect = (id: number) => {
+    setSelectedId(id);
+    loadScheduleAndBlocks(id);
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setSavingNew(true);
+    setNewError(null);
+    try {
+      await createTeamMember(token, { ...newForm, photo: newPhoto ?? undefined });
+      setNewForm({ email: '', password: '', display_name: '', bio: '' });
+      setNewPhoto(null);
+      setShowNew(false);
+      onRosterChanged();
+    } catch (err: any) {
+      setNewError(err.message);
+    } finally {
+      setSavingNew(false);
+    }
+  };
+
+  const handleToggleActive = async (tm: TeamMemberAdmin) => {
+    if (!token) return;
+    await updateTeamMember(token, tm.id, { is_active: !tm.is_active });
+    onRosterChanged();
+  };
+
+  const daySchedule = (weekday: number) => schedule.find(s => s.weekday === weekday);
+
+  const handleSaveDay = async (weekday: number, data: { is_open: boolean; opens_at: string; closes_at: string }) => {
+    if (!token || !selectedId) return;
+    setSavingDay(weekday);
+    try {
+      const saved = await saveWeeklyScheduleDay(token, selectedId, daySchedule(weekday), { weekday, ...data });
+      setSchedule(prev => [...prev.filter(s => s.weekday !== weekday), saved]);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingDay(null);
+    }
+  };
+
+  const handleCreateBlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !selectedId) return;
+    setSavingBlock(true);
+    setBlockError(null);
+    try {
+      const created = await createTimeBlock(token, { team_member: selectedId, ...newBlock });
+      setBlocks(prev => [created, ...prev]);
+      setNewBlock({ start: '', end: '', reason: 'vacation', note: '' });
+      setShowNewBlock(false);
+    } catch (err: any) {
+      setBlockError(err.message);
+    } finally {
+      setSavingBlock(false);
+    }
+  };
+
+  const handleDeleteBlock = async (id: number) => {
+    if (!token || !confirm('¿Eliminar este bloqueo?')) return;
+    await deleteTimeBlock(token, id);
+    setBlocks(prev => prev.filter(b => b.id !== id));
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Roster */}
+      <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm overflow-hidden">
+        <div className="p-8 border-b border-stone-100 flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-serif">Equipo</h3>
+            <span className="text-xs font-bold text-stone-400 uppercase tracking-widest">{teamRoster.length} miembros</span>
+          </div>
+          <button
+            onClick={() => setShowNew(v => !v)}
+            className={cn('flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-all', showNew ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-900')}
+          >
+            <Plus size={15} /> Nuevo miembro
+          </button>
+        </div>
+
+        {showNew && (
+          <form onSubmit={handleCreate} className="px-8 py-6 border-b border-stone-100 bg-stone-50 space-y-3">
+            {newError && <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{newError}</p>}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Nombre *</p>
+                <input required className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newForm.display_name} onChange={e => setNewForm(p => ({ ...p, display_name: e.target.value }))} />
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Email *</p>
+                <input required type="email" className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newForm.email} onChange={e => setNewForm(p => ({ ...p, email: e.target.value }))} />
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Contraseña *</p>
+                <input required type="password" minLength={8} className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newForm.password} onChange={e => setNewForm(p => ({ ...p, password: e.target.value }))} />
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Foto</p>
+                <input type="file" accept="image/*" onChange={e => setNewPhoto(e.target.files?.[0] ?? null)} className="text-sm text-stone-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:bg-stone-100 file:text-stone-700" />
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Bio</p>
+              <textarea rows={2} className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white resize-none" value={newForm.bio} onChange={e => setNewForm(p => ({ ...p, bio: e.target.value }))} />
+            </div>
+            <button disabled={savingNew} className="bg-stone-900 text-white text-sm px-5 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50">
+              {savingNew ? 'Creando…' : 'Crear cuenta'}
+            </button>
+          </form>
+        )}
+
+        <div className="divide-y divide-stone-50">
+          {teamRoster.map(tm => (
+            <div key={tm.id} className={cn('p-6 flex items-center gap-4 cursor-pointer transition-colors', selectedId === tm.id ? 'bg-stone-50' : 'hover:bg-stone-50')} onClick={() => handleSelect(tm.id)}>
+              <div className="w-12 h-12 rounded-full overflow-hidden bg-stone-100 shrink-0">
+                {tm.photo && <img src={tm.photo} alt={tm.display_name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-stone-900">{tm.display_name}</p>
+                <p className="text-sm text-stone-400 truncate">{tm.email}</p>
+              </div>
+              <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium', tm.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-500')}>
+                {tm.is_active ? 'Activa' : 'Inactiva'}
+              </span>
+              <button
+                onClick={e => { e.stopPropagation(); handleToggleActive(tm); }}
+                className="text-xs text-stone-500 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors"
+              >
+                {tm.is_active ? 'Desactivar' : 'Activar'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Horario y bloqueos de la seleccionada */}
+      {selected && (
+        <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+          <h4 className="text-lg font-serif text-stone-900 mb-6">Horario de {selected.display_name}</h4>
+          {scheduleLoading ? (
+            <div className="flex justify-center py-8"><Loader size={20} className="text-stone-300 animate-spin" /></div>
+          ) : (
+            <div className="space-y-2 mb-8">
+              {WEEKDAYS.map((label, weekday) => (
+                <DayScheduleRow
+                  key={weekday}
+                  label={label}
+                  day={daySchedule(weekday)}
+                  saving={savingDay === weekday}
+                  onSave={data => handleSaveDay(weekday, data)}
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-lg font-serif text-stone-900">Bloqueos</h4>
+            <button
+              onClick={() => setShowNewBlock(v => !v)}
+              className={cn('flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-all', showNewBlock ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-900')}
+            >
+              <Plus size={15} /> Nuevo bloqueo
+            </button>
+          </div>
+
+          {showNewBlock && (
+            <form onSubmit={handleCreateBlock} className="p-5 rounded-2xl border border-stone-100 bg-stone-50 mb-4 space-y-3">
+              {blockError && <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{blockError}</p>}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Desde</p>
+                  <input required type="datetime-local" className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newBlock.start} onChange={e => setNewBlock(p => ({ ...p, start: e.target.value }))} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Hasta</p>
+                  <input required type="datetime-local" className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newBlock.end} onChange={e => setNewBlock(p => ({ ...p, end: e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Motivo</p>
+                <select className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newBlock.reason} onChange={e => setNewBlock(p => ({ ...p, reason: e.target.value }))}>
+                  <option value="vacation">Vacaciones</option>
+                  <option value="holiday">Feriado</option>
+                  <option value="personal">Asunto personal</option>
+                  <option value="maintenance">Mantenimiento</option>
+                  <option value="other">Otro</option>
+                </select>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Nota</p>
+                <input className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white" value={newBlock.note} onChange={e => setNewBlock(p => ({ ...p, note: e.target.value }))} />
+              </div>
+              <button disabled={savingBlock} className="bg-stone-900 text-white text-sm px-5 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50">
+                {savingBlock ? 'Guardando…' : 'Crear bloqueo'}
+              </button>
+            </form>
+          )}
+
+          {blocks.length === 0 ? (
+            <p className="text-sm text-stone-400 italic">Sin bloqueos</p>
+          ) : (
+            <div className="space-y-2">
+              {blocks.map(b => (
+                <div key={b.id} className="flex items-center justify-between p-3 rounded-xl border border-stone-100">
+                  <div>
+                    <p className="text-sm font-medium">{b.reason_label}{b.note ? ` — ${b.note}` : ''}</p>
+                    <p className="text-xs text-stone-400">{new Date(b.start).toLocaleString('es-ES')} → {new Date(b.end).toLocaleString('es-ES')}</p>
+                  </div>
+                  <button onClick={() => handleDeleteBlock(b.id)} className="text-red-500 hover:text-red-700 p-1">
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }) => {
+  const { token, user } = useAuth();
+  const [adminTab, setAdminTab] = useState<'services' | 'calendar' | 'users' | 'billing' | 'team'>('services');
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [selected, setSelected] = useState<Product | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [users, setUsers] = useState<ClientUser[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [teamRoster, setTeamRoster] = useState<TeamMemberAdmin[]>([]);
+  const [appointments, setAppointments] = useState<CalendarEvent[]>([]);
   const [expandedUser, setExpandedUser] = useState<string | null>(null);
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState<Partial<ClientUser>>({});
@@ -1173,9 +1757,350 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
   const [saving, setSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
+  // Billing data
+  const [billingData, setBillingData] = useState<{ quotations: number; receipts: number; pending_quotations: number } | null>(null);
+  const [treasuryData, setTreasuryData] = useState<{ total_income: string; total_expenses: string; net_income: string } | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  });
+
+  // Toggle Mes/Año del tab Resumen
+  const [summaryView, setSummaryView] = useState<'month' | 'year'>('month');
+  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear());
+  const [yearlyData, setYearlyData] = useState<YearlySummaryData | null>(null);
+  const [yearlyLoading, setYearlyLoading] = useState(false);
+  const [yearlyError, setYearlyError] = useState<string | null>(null);
+
+  const loadYearlyData = async (year?: number) => {
+    if (!token) return;
+    setYearlyLoading(true);
+    setYearlyError(null);
+    try {
+      const data = await fetchYearlySummary(token, year ?? selectedYear);
+      setYearlyData(data);
+    } catch (err: any) {
+      setYearlyError(err.message);
+    } finally {
+      setYearlyLoading(false);
+    }
+  };
+
+  const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+  // Desglose de citas del mes, desplegado desde la card "Ingresos"
+  const [showIncomeDetail, setShowIncomeDetail] = useState(false);
+  const [incomeAppointments, setIncomeAppointments] = useState<AppointmentBilling[]>([]);
+  const [incomeDetailLoading, setIncomeDetailLoading] = useState(false);
+  const [incomeDetailError, setIncomeDetailError] = useState<string | null>(null);
+  const [payingId, setPayingId] = useState<number | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [savingPayment, setSavingPayment] = useState(false);
+  const [issuingReceiptId, setIssuingReceiptId] = useState<number | null>(null);
+  const [incomeActionError, setIncomeActionError] = useState<string | null>(null);
+
+  const getMonthRange = (monthStr: string) => {
+    const [year, monthNum] = monthStr.split('-');
+    const firstDay = new Date(parseInt(year), parseInt(monthNum) - 1, 1);
+    const lastDay = new Date(parseInt(year), parseInt(monthNum), 0);
+    return {
+      start: firstDay.toISOString().split('T')[0],
+      end: lastDay.toISOString().split('T')[0],
+    };
+  };
+
+  const getYearRange = (year: number) => ({
+    start: `${year}-01-01`,
+    end: `${year}-12-31`,
+  });
+
+  // Rango del período activo en Resumen (Mes o Año) — Movimientos lo comparte
+  // para que todo Facturación muestre el mismo recorte de tiempo.
+  const activePeriodRange = () =>
+    summaryView === 'year' ? getYearRange(selectedYear) : getMonthRange(selectedMonth);
+
+  const loadIncomeDetail = async (month?: string) => {
+    if (!token) return;
+    setIncomeDetailLoading(true);
+    setIncomeDetailError(null);
+    try {
+      const { start, end } = getMonthRange(month || selectedMonth);
+      const data = await fetchAppointmentsBilling(token, start, end);
+      setIncomeAppointments(data);
+    } catch (err: any) {
+      setIncomeDetailError(err.message);
+    } finally {
+      setIncomeDetailLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showIncomeDetail) loadIncomeDetail();
+  }, [showIncomeDetail, selectedMonth, token]);
+
+  const handleAppointmentStatusChange = async (apptId: number, newStatus: string) => {
+    if (!token) return;
+    setIncomeActionError(null);
+    try {
+      await updateAppointment(token, apptId, { status: newStatus });
+      setIncomeAppointments(prev => prev.map(a => a.id === apptId ? { ...a, status: newStatus } : a));
+      refreshAppointments();
+    } catch (err: any) {
+      setIncomeActionError(err.message);
+    }
+  };
+
+  const handleRegisterPayment = async (appt: AppointmentBilling) => {
+    if (!token || !appt.order) return;
+    setSavingPayment(true);
+    setIncomeActionError(null);
+    try {
+      await recordOrderPayment(token, appt.order.id, paymentAmount || undefined);
+      setPayingId(null);
+      setPaymentAmount('');
+      await Promise.all([loadIncomeDetail(), loadBillingData()]);
+    } catch (err: any) {
+      setIncomeActionError(err.message);
+    } finally {
+      setSavingPayment(false);
+    }
+  };
+
+  const handleIssueReceipt = async (appt: AppointmentBilling) => {
+    if (!token || !appt.order) return;
+    setIssuingReceiptId(appt.id);
+    setIncomeActionError(null);
+    try {
+      await issueReceipt(token, appt.order.id);
+      await loadIncomeDetail();
+    } catch (err: any) {
+      setIncomeActionError(err.message);
+    } finally {
+      setIssuingReceiptId(null);
+    }
+  };
+
+  // Desglose de gastos del mes, desplegado desde la card "Gastos"
+  const [showExpenseDetail, setShowExpenseDetail] = useState(false);
+  const [expenseTransactions, setExpenseTransactions] = useState<Transaction[]>([]);
+  const [expenseDetailLoading, setExpenseDetailLoading] = useState(false);
+  const [expenseDetailError, setExpenseDetailError] = useState<string | null>(null);
+  const [expenseActionError, setExpenseActionError] = useState<string | null>(null);
+  const [addingCategoryForId, setAddingCategoryForId] = useState<number | null>(null);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [newCategoryIsDirect, setNewCategoryIsDirect] = useState(true);
+  const [savingCategory, setSavingCategory] = useState(false);
+
+  const emptyNewExpense = { amount: '', date: new Date().toISOString().split('T')[0], description: '', method: 'cash', category: '' };
+  const [showAddExpense, setShowAddExpense] = useState(false);
+  const [newExpenseForm, setNewExpenseForm] = useState(emptyNewExpense);
+  const [savingNewExpense, setSavingNewExpense] = useState(false);
+  const [newExpenseError, setNewExpenseError] = useState<string | null>(null);
+
+  const loadExpenseDetail = async (month?: string) => {
+    if (!token) return;
+    setExpenseDetailLoading(true);
+    setExpenseDetailError(null);
+    try {
+      const { start, end } = getMonthRange(month || selectedMonth);
+      const data = await fetchTransactions(token, { direction: 'OUT', start, end });
+      setExpenseTransactions(data);
+    } catch (err: any) {
+      setExpenseDetailError(err.message);
+    } finally {
+      setExpenseDetailLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showExpenseDetail) loadExpenseDetail();
+  }, [showExpenseDetail, selectedMonth, token]);
+
+  const handleExpenseCategoryChange = async (transactionId: number, categoryId: number) => {
+    if (!token) return;
+    setExpenseActionError(null);
+    try {
+      await updateTransactionCategory(token, transactionId, categoryId);
+      setExpenseTransactions(prev => prev.map(t => t.id === transactionId ? { ...t, category: categoryId } : t));
+    } catch (err: any) {
+      setExpenseActionError(err.message);
+    }
+  };
+
+  const handleCreateCategoryAndAssign = async (transactionId: number) => {
+    if (!token || !newCategoryName.trim()) return;
+    setSavingCategory(true);
+    setExpenseActionError(null);
+    try {
+      const category = await createExpenseCategory(token, newCategoryName.trim(), newCategoryIsDirect);
+      setExpenseCategories(prev => [...prev, category]);
+      await updateTransactionCategory(token, transactionId, category.id);
+      setExpenseTransactions(prev => prev.map(t => t.id === transactionId ? { ...t, category: category.id } : t));
+      setAddingCategoryForId(null);
+      setNewCategoryName('');
+      setNewCategoryIsDirect(true);
+    } catch (err: any) {
+      setExpenseActionError(err.message);
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
+  const handleCreateExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !newExpenseForm.amount) return;
+    setSavingNewExpense(true);
+    setNewExpenseError(null);
+    try {
+      await createTransaction(token, {
+        direction: 'OUT',
+        amount: newExpenseForm.amount,
+        date: newExpenseForm.date,
+        description: newExpenseForm.description,
+        method: newExpenseForm.method,
+        ...(newExpenseForm.category ? { category: Number(newExpenseForm.category) } : {}),
+      });
+      setNewExpenseForm(emptyNewExpense);
+      setShowAddExpense(false);
+      await Promise.all([loadExpenseDetail(), loadBillingData()]);
+    } catch (err: any) {
+      setNewExpenseError(err.message);
+    } finally {
+      setSavingNewExpense(false);
+    }
+  };
+
+  // Phase 2: Detailed lists
+  const [billingTab, setBillingTab] = useState<'overview' | 'transactions' | 'documents' | 'reports'>('overview');
+  const [allOrders, setAllOrders] = useState<Order[]>([]);
+  const [payingOrderId, setPayingOrderId] = useState<number | null>(null);
+  const [orderPaymentAmount, setOrderPaymentAmount] = useState('');
+  const [savingOrderPayment, setSavingOrderPayment] = useState(false);
+  const [receipts, setReceipts] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [detailedLoading, setDetailedLoading] = useState(false);
+  const [transactionFilter, setTransactionFilter] = useState<'all' | 'income' | 'expense'>('all');
+
+  // Phase 3: EVZ Sync
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  // Create transaction form
+  const [showTransactionForm, setShowTransactionForm] = useState(false);
+  const [transactionForm, setTransactionForm] = useState({ direction: 'OUT', amount: '', date: new Date().toISOString().split('T')[0], description: '', method: 'cash', category: '' });
+  const [creatingTransaction, setCreatingTransaction] = useState(false);
+  const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
+
+  const loadBillingData = async (month?: string) => {
+    if (!token) return;
+    setBillingLoading(true);
+    setBillingError(null);
+    try {
+      const { start: startDate, end: endDate } = getMonthRange(month || selectedMonth);
+
+      const [billing, orders] = await Promise.all([
+        fetchBillingCounts(token),
+        fetchOrders(token),
+      ]);
+      setAllOrders(orders);
+
+      // Fetch treasury data for selected month
+      const treasurySummary = await fetch(
+        `/mcnails/api/treasury/summary/?start=${startDate}&end=${endDate}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      ).then(async r => {
+        if (!r.ok) throw new Error(`Treasury API error: ${r.status}`);
+        return r.json();
+      });
+
+      setBillingData(billing);
+      setTreasuryData({
+        total_income: String(treasurySummary.income || treasurySummary.total_income || '0.00'),
+        total_expenses: String(treasurySummary.expenses || treasurySummary.total_expenses || '0.00'),
+        net_income: String(treasurySummary.balance || treasurySummary.net_income || '0.00'),
+      });
+    } catch (err: any) {
+      setBillingError(err.message);
+    } finally {
+      setBillingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (adminTab === 'billing' && billingTab === 'overview' && summaryView === 'year') {
+      loadYearlyData();
+    }
+  }, [adminTab, billingTab, summaryView, selectedYear, token]);
+
+  const handleSelectMonthFromYear = (month: number) => {
+    const monthStr = `${selectedYear}-${String(month).padStart(2, '0')}`;
+    setSelectedMonth(monthStr);
+    setSummaryView('month');
+    loadBillingData(monthStr);
+  };
+
+  const loadDetailedData = async () => {
+    if (!token) return;
+    setDetailedLoading(true);
+    try {
+      const { start, end } = activePeriodRange();
+      const [orders, recps, trans, cats] = await Promise.all([
+        fetchOrders(token),
+        fetchReceipts(token),
+        fetchTransactions(token, { start, end }),
+        fetchExpenseCategories(token),
+      ]);
+      setAllOrders(orders);
+      setReceipts(recps);
+      setTransactions(trans);
+      setExpenseCategories(cats);
+    } catch (err) {
+      console.error('Error loading detailed data:', err);
+    } finally {
+      setDetailedLoading(false);
+    }
+  };
+
+  const handleRegisterOrderPayment = async (order: Order) => {
+    if (!token) return;
+    setSavingOrderPayment(true);
+    try {
+      await recordOrderPayment(token, order.id, orderPaymentAmount || undefined);
+      setPayingOrderId(null);
+      setOrderPaymentAmount('');
+      await loadDetailedData();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingOrderPayment(false);
+    }
+  };
+
+  const [closingOrderId, setClosingOrderId] = useState<number | null>(null);
+  const handleCloseOrder = async (orderId: number) => {
+    if (!token) return;
+    setClosingOrderId(orderId);
+    try {
+      await updateOrderStatus(token, orderId, 'completed');
+      await loadDetailedData();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setClosingOrderId(null);
+    }
+  };
+
   const loadProducts = () => {
     if (!token) return;
     fetchAdminProducts(token).then(setProducts).catch(console.error);
+  };
+
+  const loadTeamRoster = () => {
+    if (!token || !user?.is_superuser) return;
+    fetchAllTeamMembers(token).then(setTeamRoster).catch(console.error);
   };
 
   useEffect(() => {
@@ -1183,7 +2108,46 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
     loadProducts();
     fetchAdminCategories(token).then(setCategories).catch(console.error);
     fetchUsers(token).then(setUsers).catch(console.error);
-  }, [token]);
+    fetchOrderCustomers(token).then(setCustomers).catch(console.error);
+    fetchAppointments(token).then(setAppointments).catch(console.error);
+    loadTeamRoster();
+  }, [token, user?.is_superuser]);
+
+  const refreshAppointments = () => {
+    if (!token) return;
+    fetchAppointments(token).then(setAppointments).catch(console.error);
+  };
+
+  const upcomingAppointments = appointments
+    .filter(e => e.extendedProps.status !== 'cancelled' && new Date(e.end) > new Date())
+    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+
+  // Documentos: Órdenes sin pagar (no completadas) y Recibos (órdenes
+  // cerradas), ambas acotadas al período activo de Facturación.
+  const orderDateForFilter = (o: Order) => o.booking_date || o.created_at.slice(0, 10);
+  const ordersInPeriod = (() => {
+    const { start, end } = activePeriodRange();
+    return allOrders.filter(o => {
+      const d = orderDateForFilter(o);
+      return d >= start && d <= end;
+    });
+  })();
+  const unpaidOrders = ordersInPeriod.filter(o => o.status !== 'completed');
+  const closedOrders = ordersInPeriod.filter(o => o.status === 'completed');
+  const ordersNotFullyPaid = ordersInPeriod.filter(o => !o.is_fully_paid);
+
+  useEffect(() => {
+    if (adminTab === 'billing') {
+      loadBillingData();
+      if (token) fetchExpenseCategories(token).then(setExpenseCategories).catch(console.error);
+    }
+  }, [adminTab, token]);
+
+  useEffect(() => {
+    if (adminTab === 'billing' && (billingTab === 'transactions' || billingTab === 'documents' || billingTab === 'reports')) {
+      loadDetailedData();
+    }
+  }, [billingTab, adminTab, token, summaryView, selectedMonth, selectedYear]);
 
   const handleSelect = (p: Product) => {
     setSelected(p);
@@ -1228,11 +2192,22 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
 
   const inputClass = "w-full p-3 rounded-xl border border-stone-200 focus:outline-none focus:border-stone-900 text-sm";
 
-  const cards: { id: 'services' | 'calendar' | 'users' | 'billing'; label: string; icon: React.ReactNode; value: string | number; sub: string }[] = [
+  const cards: { id: 'services' | 'calendar' | 'users' | 'billing' | 'team'; label: string; icon: React.ReactNode; value: string | number; sub: string }[] = [
     { id: 'services', label: 'Servicios', icon: <ShoppingBag size={20} />, value: products.length,                          sub: `${products.filter(p => p.is_active).length} activos` },
-    { id: 'calendar', label: 'Agenda',    icon: <CalendarIcon size={20} />, value: '—',                                     sub: 'Citas del salón' },
-    { id: 'users',    label: 'Clientes',  icon: <User size={20} />,         value: users.length,                            sub: `${users.filter(u => u.is_verified).length} verificados` },
-    { id: 'billing',  label: 'Facturación', icon: <CreditCard size={20} />, value: '—',                                    sub: 'Próximamente' },
+    {
+      id: 'calendar', label: 'Agenda', icon: <CalendarIcon size={20} />,
+      value: upcomingAppointments.length,
+      sub: upcomingAppointments[0]
+        ? `Próxima: ${upcomingAppointments[0].title.split(' — ')[0]} · ${new Date(upcomingAppointments[0].start).toLocaleString('es', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/Caracas' })}`
+        : 'Sin citas próximas',
+    },
+    { id: 'users',    label: 'Clientes',  icon: <User size={20} />,         value: customers.length,                            sub: customers.length > 0 ? `$${(customers.reduce((sum, c) => sum + parseFloat(c.total_spent), 0)).toLocaleString('es-ES', { maximumFractionDigits: 0 })} gastado` : 'Sin compras' },
+    { id: 'billing',  label: 'Facturación', icon: <CreditCard size={20} />, value: treasuryData ? `$${(treasuryData.total_income ? parseFloat(treasuryData.total_income) : 0).toLocaleString('es-ES', { maximumFractionDigits: 0 })}` : '—', sub: treasuryData ? 'Ingresos del mes' : 'Cargando...' },
+    ...(user?.is_superuser ? [{
+      id: 'team' as const, label: 'Equipo', icon: <Users size={20} />,
+      value: teamRoster.length,
+      sub: `${teamRoster.filter(t => t.is_active).length} activas`,
+    }] : []),
   ];
 
   return (
@@ -1272,18 +2247,30 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
         ))}
       </div>
 
-      {adminTab === 'calendar' && <AppointmentsCalendar products={products} />}
+      {adminTab === 'calendar' && (
+        <AppointmentsCalendar
+          products={products}
+          customers={customers}
+          onCustomerSaved={() => token && fetchOrderCustomers(token).then(setCustomers).catch(console.error)}
+          onAppointmentsChanged={refreshAppointments}
+        />
+      )}
+
+      {adminTab === 'team' && user?.is_superuser && (
+        <TeamManagement teamRoster={teamRoster} onRosterChanged={loadTeamRoster} />
+      )}
 
       {adminTab === 'users' && (
         <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm overflow-hidden">
           <div className="p-8 border-b border-stone-100 flex items-center justify-between">
             <div>
-              <h3 className="text-2xl font-serif">Clientes registrados</h3>
-              <span className="text-xs font-bold text-stone-400 uppercase tracking-widest">{users.length} total</span>
+              <h3 className="text-2xl font-serif">Clientes</h3>
+              <span className="text-xs font-bold text-stone-400 uppercase tracking-widest">{customers.length} clientes únicos</span>
             </div>
             <button
               onClick={() => { setShowNewUser(v => !v); setNewUserError(null); }}
               className={cn('flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-all', showNewUser ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-900')}
+              style={{ display: 'none' }}
             >
               <Plus size={15} /> Nuevo cliente
             </button>
@@ -1344,165 +2331,1156 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
             </div>
           )}
 
-          {users.length === 0 ? (
+          {customers.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 text-stone-400">
               <User size={28} className="mb-3 text-stone-200" />
               <p className="font-serif">Sin clientes aún</p>
             </div>
           ) : (
-            <div className="divide-y divide-stone-50">
-              {users.map(u => {
-                const isOpen = expandedUser === u.id;
-                const isEditing = editingUser === u.id;
-                const initial = u.first_name?.[0]?.toUpperCase() ?? (u.email?.[0]?.toUpperCase() ?? u.phone?.[0] ?? '?');
-
-                const openEdit = () => {
-                  setEditingUser(u.id);
-                  setUserDraft({ first_name: u.first_name, last_name: u.last_name, email: u.email ?? '', phone: u.phone, notes: u.notes });
-                };
-                const cancelEdit = () => { setEditingUser(null); setUserDraft({}); };
-                const saveEdit = async () => {
-                  if (!token) return;
-                  setSavingUser(true);
-                  try {
-                    const updated = await adminUpdateUser(token, u.id, userDraft);
-                    setUsers(prev => prev.map(x => x.id === u.id ? { ...x, ...updated } : x));
-                    setEditingUser(null);
-                    setUserDraft({});
-                  } catch (e: any) {
-                    alert(e.message);
-                  } finally {
-                    setSavingUser(false);
-                  }
-                };
-
-                const field = (key: keyof typeof userDraft) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-                  setUserDraft(prev => ({ ...prev, [key]: e.target.value }));
-
-                const iClass = "w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white";
-
-                return (
-                  <div key={u.id}>
-                    <button
-                      onClick={() => { setExpandedUser(isOpen ? null : u.id); if (isEditing) cancelEdit(); }}
-                      className="w-full flex items-center gap-4 px-8 py-4 hover:bg-stone-50 transition-colors text-left"
-                    >
-                      <div className="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center text-stone-500 font-semibold text-sm shrink-0">
-                        {initial}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium text-sm truncate">
-                          {u.first_name || u.last_name ? `${u.first_name} ${u.last_name}`.trim() : <span className="text-stone-400 italic">Sin nombre</span>}
-                        </p>
-                        <p className="text-xs text-stone-400 truncate">{u.email ?? u.phone}</p>
-                      </div>
-                      <div className="flex items-center gap-3 shrink-0">
-                        <span className={cn('text-xs px-2 py-0.5 rounded-full font-medium', u.is_verified ? 'bg-emerald-50 text-emerald-600' : 'bg-stone-100 text-stone-400')}>
-                          {u.is_verified ? 'Verificada' : 'Pendiente'}
-                        </span>
-                        <ChevronDown size={16} className={cn('text-stone-300 transition-transform', isOpen && 'rotate-180')} />
-                      </div>
-                    </button>
-
-                    {isOpen && (
-                      <div className="px-8 pb-6 pt-2 bg-stone-50 space-y-4">
-                        {isEditing ? (
-                          <>
-                            <div className="grid grid-cols-2 gap-3">
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Nombre</p>
-                                <input className={iClass} value={userDraft.first_name ?? ''} onChange={field('first_name')} placeholder="Nombre" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Apellido</p>
-                                <input className={iClass} value={userDraft.last_name ?? ''} onChange={field('last_name')} placeholder="Apellido" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Email</p>
-                                <input type="email" className={iClass} value={userDraft.email ?? ''} onChange={field('email')} placeholder="—" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">WhatsApp</p>
-                                <input type="tel" className={iClass} value={userDraft.phone ?? ''} onChange={field('phone')} placeholder="—" />
-                              </div>
-                            </div>
-                            <div>
-                              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Notas internas</p>
-                              <textarea rows={3} className={cn(iClass, 'resize-none')} value={userDraft.notes ?? ''} onChange={field('notes')} placeholder="Notas sobre la cliente…" />
-                            </div>
-                            <div className="flex gap-3">
-                              <button onClick={saveEdit} disabled={savingUser} className="bg-stone-900 text-white text-sm px-5 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50">
-                                {savingUser ? 'Guardando…' : 'Guardar'}
-                              </button>
-                              <button onClick={cancelEdit} className="text-sm text-stone-500 hover:text-stone-900 px-4 py-2 rounded-full transition-colors">
-                                Cancelar
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Email</p>
-                                <p className="text-stone-700">{u.email || <span className="text-stone-400 italic">—</span>}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">WhatsApp</p>
-                                <p className="text-stone-700">{u.phone || <span className="text-stone-400 italic">—</span>}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Miembro desde</p>
-                                <p className="text-stone-700">{new Date(u.date_joined).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' })}</p>
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Notas</p>
-                                <p className="text-stone-700 whitespace-pre-wrap">{u.notes || <span className="text-stone-400 italic">Sin notas</span>}</p>
-                              </div>
-                            </div>
-                            <button onClick={openEdit} className="text-xs font-medium text-stone-500 hover:text-stone-900 border border-stone-200 px-4 py-1.5 rounded-full transition-colors">
-                              Editar
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-stone-100">
+                    <th className="text-left py-3 px-4 font-medium text-stone-600">Nombre</th>
+                    <th className="text-left py-3 px-4 font-medium text-stone-600">Email</th>
+                    <th className="text-center py-3 px-4 font-medium text-stone-600">Órdenes</th>
+                    <th className="text-right py-3 px-4 font-medium text-stone-600">Gastado</th>
+                    <th className="text-left py-3 px-4 font-medium text-stone-600">Primera orden</th>
+                    <th className="text-left py-3 px-4 font-medium text-stone-600">Última orden</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customers.map((c, idx) => (
+                    <tr key={idx} className="border-b border-stone-50 hover:bg-stone-50 transition-colors">
+                      <td className="py-3 px-4 font-medium text-stone-900">{c.name}</td>
+                      <td className="py-3 px-4 text-stone-600">{c.email || '—'}</td>
+                      <td className="py-3 px-4 text-center text-stone-600">{c.order_count}</td>
+                      <td className="py-3 px-4 text-right font-medium text-emerald-700">${parseFloat(c.total_spent).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                      <td className="py-3 px-4 text-stone-600 text-sm">{c.first_order_date ? new Date(c.first_order_date).toLocaleDateString('es-ES') : '—'}</td>
+                      <td className="py-3 px-4 text-stone-600 text-sm">{c.last_order_date ? new Date(c.last_order_date).toLocaleDateString('es-ES') : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
       )}
 
       {adminTab === 'billing' && (
-        <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
-          <div className="flex items-center gap-4 mb-10">
-            <div className="w-12 h-12 bg-stone-100 rounded-2xl flex items-center justify-center text-stone-400">
-              <CreditCard size={22} />
-            </div>
-            <div>
-              <h3 className="text-2xl font-serif">Facturación</h3>
-              <p className="text-stone-400 text-sm">Historial de pagos y reportes</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
-            {[
-              { label: 'Ingresos del mes', value: '—', sub: 'Próximamente' },
-              { label: 'Citas pagadas', value: '—', sub: 'Próximamente' },
-              { label: 'Pendientes de cobro', value: '—', sub: 'Próximamente' },
-            ].map((s, i) => (
-              <div key={i} className="p-6 rounded-3xl border border-stone-100 bg-stone-50">
-                <p className="text-xs font-bold text-stone-400 uppercase tracking-widest mb-2">{s.label}</p>
-                <p className="text-3xl font-serif text-stone-300 mb-1">{s.value}</p>
-                <p className="text-xs text-stone-300">{s.sub}</p>
+        <div className="space-y-6">
+          {/* Header */}
+          <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-stone-100 rounded-2xl flex items-center justify-center text-stone-400">
+                  <CreditCard size={22} />
+                </div>
+                <div>
+                  <h3 className="text-2xl font-serif">Facturación</h3>
+                  <p className="text-stone-400 text-sm">Resumen de ingresos, gastos y documentos</p>
+                </div>
               </div>
-            ))}
+              {billingTab === 'overview' && (
+                <button
+                  onClick={loadBillingData}
+                  className="text-xs font-medium text-stone-500 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors"
+                >
+                  Actualizar
+                </button>
+              )}
+            </div>
+
+            {/* Internal tabs */}
+            <div className="flex gap-2 border-b border-stone-100 -mx-8 px-8 pb-0">
+              {[
+                { id: 'overview', label: 'Resumen' },
+                { id: 'transactions', label: 'Movimientos' },
+                { id: 'documents', label: 'Documentos' },
+                { id: 'reports', label: 'Reportes' },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setBillingTab(tab.id as any)}
+                  className={cn(
+                    'px-4 py-3 text-sm font-medium border-b-2 transition-colors -mb-px',
+                    billingTab === tab.id
+                      ? 'border-stone-900 text-stone-900'
+                      : 'border-transparent text-stone-500 hover:text-stone-700'
+                  )}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex flex-col items-center justify-center py-12 text-center border-2 border-dashed border-stone-200 rounded-3xl">
-            <CreditCard size={36} className="text-stone-200 mb-4" />
-            <p className="font-serif text-lg text-stone-400 mb-2">Módulo en desarrollo</p>
-            <p className="text-sm text-stone-300 max-w-xs">La integración de pagos y reportes de facturación estará disponible próximamente.</p>
-          </div>
+
+          {/* Content */}
+          {billingError && (
+            <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3">
+              <AlertCircle size={18} className="text-red-500 mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-red-900">{billingError}</p>
+                <button onClick={loadBillingData} className="text-xs text-red-600 hover:text-red-700 mt-2 font-medium">
+                  Reintentar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Overview Tab */}
+          {billingTab === 'overview' && (
+            <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+              {billingLoading ? (
+                <div className="flex flex-col items-center justify-center py-16">
+                  <Loader size={32} className="text-stone-300 mb-4 animate-spin" />
+                  <p className="text-stone-400 font-serif text-lg">Cargando datos...</p>
+                </div>
+              ) : billingData && treasuryData ? (
+                <div className="space-y-8">
+                  {/* Toggle Mes/Año */}
+                  <div className="flex items-center justify-between pb-4 border-b border-stone-100">
+                    <div>
+                      <p className="text-xs font-bold text-stone-400 uppercase tracking-widest mb-2">Período</p>
+                      {summaryView === 'month' ? (
+                        <input
+                          type="month"
+                          value={selectedMonth}
+                          onChange={e => {
+                            setSelectedMonth(e.target.value);
+                            loadBillingData(e.target.value);
+                          }}
+                          className="px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          value={selectedYear}
+                          onChange={e => setSelectedYear(Number(e.target.value))}
+                          className="w-28 px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                        />
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex rounded-full border border-stone-200 p-0.5">
+                        <button
+                          onClick={() => setSummaryView('month')}
+                          className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'month' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                        >
+                          Mes
+                        </button>
+                        <button
+                          onClick={() => setSummaryView('year')}
+                          className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'year' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                        >
+                          Año
+                        </button>
+                      </div>
+                      {summaryView === 'month' ? (
+                        <button
+                          onClick={() => {
+                            const today = new Date();
+                            const currentMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+                            setSelectedMonth(currentMonth);
+                            loadBillingData(currentMonth);
+                          }}
+                          className="text-xs font-medium text-stone-500 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors"
+                        >
+                          Mes actual
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setSelectedYear(new Date().getFullYear())}
+                          className="text-xs font-medium text-stone-500 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors"
+                        >
+                          Año actual
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {summaryView === 'year' ? (
+                    <div className="space-y-6">
+                      {yearlyLoading ? (
+                        <div className="flex justify-center py-12">
+                          <Loader size={24} className="text-stone-300 animate-spin" />
+                        </div>
+                      ) : yearlyError ? (
+                        <p className="text-sm text-red-600">{yearlyError}</p>
+                      ) : yearlyData && (
+                        <>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="p-6 rounded-3xl border border-emerald-100 bg-emerald-50">
+                              <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest mb-2">Ingresos ({yearlyData.year})</p>
+                              <p className="text-3xl font-serif text-emerald-900">${parseFloat(yearlyData.total_income).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</p>
+                            </div>
+                            <div className="p-6 rounded-3xl border border-red-100 bg-red-50">
+                              <p className="text-xs font-bold text-red-600 uppercase tracking-widest mb-2">Gastos ({yearlyData.year})</p>
+                              <p className="text-3xl font-serif text-red-900">${parseFloat(yearlyData.total_expenses).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</p>
+                            </div>
+                            <div className="p-6 rounded-3xl border border-stone-200 bg-stone-50">
+                              <p className="text-xs font-bold text-stone-600 uppercase tracking-widest mb-2">Ganancia neta</p>
+                              <p className="text-3xl font-serif text-stone-900">${parseFloat(yearlyData.total_balance).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</p>
+                            </div>
+                          </div>
+
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="border-b border-stone-100">
+                                  <th className="text-left py-3 px-4 font-medium text-stone-600">Mes</th>
+                                  <th className="text-right py-3 px-4 font-medium text-stone-600">Ingresos</th>
+                                  <th className="text-right py-3 px-4 font-medium text-stone-600">Gastos</th>
+                                  <th className="text-right py-3 px-4 font-medium text-stone-600">Neto</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {yearlyData.months.map(m => (
+                                  <tr
+                                    key={m.month}
+                                    onClick={() => handleSelectMonthFromYear(m.month)}
+                                    className="border-b border-stone-50 hover:bg-stone-50 transition-colors cursor-pointer"
+                                  >
+                                    <td className="py-3 px-4 font-medium text-stone-900">{monthNames[m.month - 1]}</td>
+                                    <td className="py-3 px-4 text-right text-emerald-700">${parseFloat(m.income).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                                    <td className="py-3 px-4 text-right text-red-700">${parseFloat(m.expenses).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                                    <td className="py-3 px-4 text-right font-medium text-stone-900">${parseFloat(m.balance).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <p className="text-xs text-stone-400 -mt-2">Click en un mes para ver su detalle.</p>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                  <>
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowIncomeDetail(v => !v)}
+                      className="text-left p-6 rounded-3xl border border-emerald-100 bg-emerald-50 hover:border-emerald-300 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Ingresos (mes)</p>
+                        <ChevronDown size={16} className={cn('text-emerald-500 transition-transform', showIncomeDetail && 'rotate-180')} />
+                      </div>
+                      <p className="text-3xl font-serif text-emerald-900 mb-1">
+                        ${(treasuryData.total_income ? parseFloat(treasuryData.total_income) : 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-xs text-emerald-600">Ver citas del mes</p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowExpenseDetail(v => !v)}
+                      className="text-left p-6 rounded-3xl border border-red-100 bg-red-50 hover:border-red-300 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-bold text-red-600 uppercase tracking-widest">Gastos (mes)</p>
+                        <ChevronDown size={16} className={cn('text-red-500 transition-transform', showExpenseDetail && 'rotate-180')} />
+                      </div>
+                      <p className="text-3xl font-serif text-red-900 mb-1">
+                        ${(treasuryData.total_expenses ? parseFloat(treasuryData.total_expenses) : 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-xs text-red-600">Ver gastos del mes</p>
+                    </button>
+
+                    <div className="p-6 rounded-3xl border border-stone-200 bg-stone-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-bold text-stone-600 uppercase tracking-widest">Ganancia neta</p>
+                        <CheckCircle2 size={16} className="text-stone-500" />
+                      </div>
+                      <p className="text-3xl font-serif text-stone-900 mb-1">
+                        ${(treasuryData.net_income ? parseFloat(treasuryData.net_income) : 0).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-xs text-stone-600">Este mes</p>
+                    </div>
+
+                    <div className="p-6 rounded-3xl border border-amber-100 bg-amber-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-bold text-amber-600 uppercase tracking-widest">Pendientes</p>
+                        <Clock size={16} className="text-amber-500" />
+                      </div>
+                      <p className="text-3xl font-serif text-amber-900 mb-1">{ordersNotFullyPaid.length}</p>
+                      <p className="text-xs text-amber-600">Órdenes aún no pagadas</p>
+                    </div>
+                  </div>
+
+                  {/* Income detail: citas del mes */}
+                  {showIncomeDetail && (
+                    <div className="border-t border-stone-100 pt-8">
+                      <h4 className="text-lg font-serif text-stone-900 mb-4">Citas de {new Date(selectedMonth + '-02').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })}</h4>
+
+                      {incomeActionError && (
+                        <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2 mb-3">{incomeActionError}</p>
+                      )}
+
+                      {incomeDetailLoading ? (
+                        <div className="flex justify-center py-12">
+                          <Loader size={24} className="text-stone-300 animate-spin" />
+                        </div>
+                      ) : incomeDetailError ? (
+                        <p className="text-sm text-red-600">{incomeDetailError}</p>
+                      ) : incomeAppointments.length === 0 ? (
+                        <div className="text-center py-12 text-stone-400">
+                          <p className="font-serif">Sin citas este mes</p>
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-stone-100">
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Cliente</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Servicio</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Fecha</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Estado</th>
+                                <th className="text-right py-3 px-4 font-medium text-stone-600">Monto</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Pago</th>
+                                <th className="text-right py-3 px-4 font-medium text-stone-600">Acciones</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {incomeAppointments.map(appt => (
+                                <tr key={appt.id} className="border-b border-stone-50 hover:bg-stone-50 transition-colors align-top">
+                                  <td className="py-3 px-4 font-medium text-stone-900">{appt.customer_name}</td>
+                                  <td className="py-3 px-4 text-stone-600">{appt.services.join(', ') || '—'}</td>
+                                  <td className="py-3 px-4 text-stone-600 text-xs">
+                                    {new Date(appt.start_time).toLocaleString('es', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/Caracas' })}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <select
+                                      value={appt.status}
+                                      onChange={e => handleAppointmentStatusChange(appt.id, e.target.value)}
+                                      className="text-xs px-2 py-1.5 rounded-lg border border-stone-200 focus:outline-none focus:border-stone-900 bg-white"
+                                    >
+                                      <option value="pending">Pendiente</option>
+                                      <option value="confirmed">Confirmado</option>
+                                      <option value="completed">Completado</option>
+                                      <option value="cancelled">Cancelado</option>
+                                    </select>
+                                  </td>
+                                  <td className="py-3 px-4 text-right font-medium">
+                                    {appt.order ? `$${parseFloat(appt.order.total_amount).toLocaleString('es-ES', { minimumFractionDigits: 2 })}` : '—'}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    {!appt.order ? (
+                                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-stone-100 text-stone-500">Sin orden</span>
+                                    ) : appt.order.is_fully_paid ? (
+                                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-emerald-100 text-emerald-700">Pagado</span>
+                                    ) : parseFloat(appt.order.amount_paid) > 0 ? (
+                                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-100 text-amber-700">
+                                        Parcial ${parseFloat(appt.order.amount_paid).toLocaleString('es-ES', { minimumFractionDigits: 2 })} de ${parseFloat(appt.order.total_amount).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                                      </span>
+                                    ) : (
+                                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-red-50 text-red-600">Pendiente</span>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <div className="flex flex-col items-end gap-1.5">
+                                      {payingId === appt.id ? (
+                                        <div className="flex items-center gap-1.5">
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            autoFocus
+                                            placeholder={appt.order?.balance_due}
+                                            value={paymentAmount}
+                                            onChange={e => setPaymentAmount(e.target.value)}
+                                            className="w-20 px-2 py-1 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                                          />
+                                          <button
+                                            disabled={savingPayment}
+                                            onClick={() => handleRegisterPayment(appt)}
+                                            className="text-xs bg-stone-900 text-white px-2.5 py-1 rounded-lg hover:bg-stone-800 disabled:opacity-50"
+                                          >
+                                            {savingPayment ? '…' : 'OK'}
+                                          </button>
+                                          <button
+                                            onClick={() => { setPayingId(null); setPaymentAmount(''); }}
+                                            className="text-xs text-stone-400 hover:text-stone-600 px-1"
+                                          >
+                                            ×
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          disabled={!appt.order || appt.order.is_fully_paid}
+                                          onClick={() => { setPayingId(appt.id); setPaymentAmount(appt.order?.balance_due || ''); }}
+                                          className="text-xs text-stone-600 hover:text-stone-900 px-2.5 py-1 rounded-full border border-stone-200 hover:border-stone-300 disabled:opacity-40 disabled:hover:border-stone-200 transition-colors whitespace-nowrap"
+                                        >
+                                          Registrar pago
+                                        </button>
+                                      )}
+                                      <button
+                                        disabled={!appt.order || appt.order.has_receipt || issuingReceiptId === appt.id}
+                                        onClick={() => handleIssueReceipt(appt)}
+                                        className="text-xs text-stone-600 hover:text-stone-900 px-2.5 py-1 rounded-full border border-stone-200 hover:border-stone-300 disabled:opacity-40 disabled:hover:border-stone-200 transition-colors whitespace-nowrap"
+                                      >
+                                        {issuingReceiptId === appt.id ? 'Emitiendo…' : appt.order?.has_receipt ? 'Recibo emitido' : 'Emitir recibo'}
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Expense detail: gastos del mes */}
+                  {showExpenseDetail && (
+                    <div className="border-t border-stone-100 pt-8">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-lg font-serif text-stone-900">Gastos de {new Date(selectedMonth + '-02').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })}</h4>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddExpense(v => !v)}
+                          className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors', showAddExpense ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-300')}
+                        >
+                          <Plus size={14} /> Registrar gasto
+                        </button>
+                      </div>
+
+                      {showAddExpense && (
+                        <form onSubmit={handleCreateExpense} className="mb-6 p-5 rounded-2xl border border-stone-100 bg-stone-50">
+                          {newExpenseError && <p className="text-xs text-red-600 bg-red-50 p-2 rounded mb-3">{newExpenseError}</p>}
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Monto *</p>
+                              <input
+                                required type="number" step="0.01" placeholder="0.00"
+                                value={newExpenseForm.amount}
+                                onChange={e => setNewExpenseForm(p => ({ ...p, amount: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Fecha</p>
+                              <input
+                                type="date"
+                                value={newExpenseForm.date}
+                                onChange={e => setNewExpenseForm(p => ({ ...p, date: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Método</p>
+                              <select
+                                value={newExpenseForm.method}
+                                onChange={e => setNewExpenseForm(p => ({ ...p, method: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                              >
+                                <option value="cash">Efectivo</option>
+                                <option value="transfer">Transferencia</option>
+                                <option value="card">Tarjeta</option>
+                                <option value="other">Otro</option>
+                              </select>
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Categoría</p>
+                              <select
+                                value={newExpenseForm.category}
+                                onChange={e => setNewExpenseForm(p => ({ ...p, category: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                              >
+                                <option value="">Sin categoría</option>
+                                {expenseCategories.map(cat => (
+                                  <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="mb-3">
+                            <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Descripción</p>
+                            <input
+                              type="text" placeholder="Ej: Compra de insumos"
+                              value={newExpenseForm.description}
+                              onChange={e => setNewExpenseForm(p => ({ ...p, description: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="submit"
+                              disabled={savingNewExpense || !newExpenseForm.amount}
+                              className="bg-stone-900 text-white text-sm px-4 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50"
+                            >
+                              {savingNewExpense ? 'Guardando…' : 'Guardar'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setShowAddExpense(false); setNewExpenseForm(emptyNewExpense); setNewExpenseError(null); }}
+                              className="text-sm text-stone-500 hover:text-stone-900 px-4 py-2 rounded-full transition-colors"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {expenseActionError && (
+                        <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2 mb-3">{expenseActionError}</p>
+                      )}
+
+                      {expenseDetailLoading ? (
+                        <div className="flex justify-center py-12">
+                          <Loader size={24} className="text-stone-300 animate-spin" />
+                        </div>
+                      ) : expenseDetailError ? (
+                        <p className="text-sm text-red-600">{expenseDetailError}</p>
+                      ) : expenseTransactions.length === 0 ? (
+                        <div className="text-center py-12 text-stone-400">
+                          <p className="font-serif">Sin gastos este mes</p>
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-stone-100">
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Fecha</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Descripción</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Método</th>
+                                <th className="text-right py-3 px-4 font-medium text-stone-600">Monto</th>
+                                <th className="text-left py-3 px-4 font-medium text-stone-600">Categoría</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {expenseTransactions.map(t => (
+                                <tr key={t.id} className="border-b border-stone-50 hover:bg-stone-50 transition-colors align-top">
+                                  <td className="py-3 px-4 text-stone-600">{new Date(t.date).toLocaleDateString('es-ES')}</td>
+                                  <td className="py-3 px-4 text-stone-900 font-medium">{t.description || '—'}</td>
+                                  <td className="py-3 px-4 text-stone-600 text-xs capitalize">{t.method}</td>
+                                  <td className="py-3 px-4 text-right font-medium text-red-700">
+                                    ${parseFloat(t.amount).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    {addingCategoryForId === t.id ? (
+                                      <div className="flex flex-col gap-1.5 min-w-[180px]">
+                                        <input
+                                          autoFocus
+                                          placeholder="Nombre de categoría"
+                                          value={newCategoryName}
+                                          onChange={e => setNewCategoryName(e.target.value)}
+                                          className="px-2 py-1 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                                        />
+                                        <label className="flex items-center gap-1.5 text-xs text-stone-500">
+                                          <input
+                                            type="checkbox"
+                                            checked={newCategoryIsDirect}
+                                            onChange={e => setNewCategoryIsDirect(e.target.checked)}
+                                            className="rounded"
+                                          />
+                                          Gasto directo (atribuible)
+                                        </label>
+                                        <div className="flex gap-1.5">
+                                          <button
+                                            disabled={savingCategory || !newCategoryName.trim()}
+                                            onClick={() => handleCreateCategoryAndAssign(t.id)}
+                                            className="text-xs bg-stone-900 text-white px-2.5 py-1 rounded-lg hover:bg-stone-800 disabled:opacity-50"
+                                          >
+                                            {savingCategory ? '…' : 'Guardar'}
+                                          </button>
+                                          <button
+                                            onClick={() => { setAddingCategoryForId(null); setNewCategoryName(''); setNewCategoryIsDirect(true); }}
+                                            className="text-xs text-stone-400 hover:text-stone-600 px-1"
+                                          >
+                                            Cancelar
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <select
+                                        value={t.category ?? ''}
+                                        onChange={e => {
+                                          const v = e.target.value;
+                                          if (v === '__new__') setAddingCategoryForId(t.id);
+                                          else if (v) handleExpenseCategoryChange(t.id, Number(v));
+                                        }}
+                                        className="text-xs px-2 py-1.5 rounded-lg border border-stone-200 focus:outline-none focus:border-stone-900 bg-white"
+                                      >
+                                        <option value="" disabled>Sin categoría</option>
+                                        {expenseCategories.map(cat => (
+                                          <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                        ))}
+                                        <option value="__new__">+ Nueva categoría</option>
+                                      </select>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  </>
+                  )}
+
+                  {/* Documents Summary */}
+                  <div className="border-t border-stone-100 pt-8">
+                    <h4 className="text-lg font-serif text-stone-900 mb-4">Documentos</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="p-5 rounded-2xl border border-stone-100 hover:border-stone-300 transition-colors">
+                        <p className="text-sm font-medium text-stone-600 mb-2">Cotizaciones</p>
+                        <p className="text-2xl font-serif text-stone-900">{unpaidOrders.length}</p>
+                        <p className="text-xs text-stone-400 mt-1">Órdenes abiertas este período</p>
+                      </div>
+                      <div className="p-5 rounded-2xl border border-stone-100 hover:border-stone-300 transition-colors">
+                        <p className="text-sm font-medium text-stone-600 mb-2">Recibos</p>
+                        <p className="text-2xl font-serif text-stone-900">{billingData.receipts}</p>
+                        <p className="text-xs text-stone-400 mt-1">Total emitidos</p>
+                      </div>
+                      <div className="p-5 rounded-2xl border border-stone-100 hover:border-stone-300 transition-colors">
+                        <p className="text-sm font-medium text-stone-600 mb-2">Tasa de conversión</p>
+                        <p className="text-2xl font-serif text-stone-900">
+                          {billingData.quotations > 0 ? ((billingData.receipts / billingData.quotations) * 100).toFixed(0) : 0}%
+                        </p>
+                        <p className="text-xs text-stone-400 mt-1">Cotizaciones aceptadas</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <CreditCard size={36} className="text-stone-200 mb-4" />
+                  <p className="font-serif text-lg text-stone-400 mb-2">Sin datos disponibles</p>
+                  <p className="text-sm text-stone-300">Aún no hay movimientos de facturación registrados.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Transactions Tab */}
+          {billingTab === 'transactions' && (
+            <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+              <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+                <h4 className="text-lg font-serif text-stone-900">Movimientos de Tesorería</h4>
+                <div className="flex items-center gap-2">
+                  <div className="flex rounded-full border border-stone-200 p-0.5">
+                    <button
+                      onClick={() => setSummaryView('month')}
+                      className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'month' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                    >
+                      Mes
+                    </button>
+                    <button
+                      onClick={() => setSummaryView('year')}
+                      className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'year' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                    >
+                      Año
+                    </button>
+                  </div>
+                  {summaryView === 'month' ? (
+                    <input
+                      type="month"
+                      value={selectedMonth}
+                      onChange={e => setSelectedMonth(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                    />
+                  ) : (
+                    <input
+                      type="number"
+                      value={selectedYear}
+                      onChange={e => setSelectedYear(Number(e.target.value))}
+                      className="w-24 px-3 py-1.5 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end mb-6">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setTransactionFilter('all')}
+                    className={cn('px-3 py-1.5 text-xs font-medium rounded-full border transition-colors', transactionFilter === 'all' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-300')}
+                  >
+                    Todos
+                  </button>
+                  <button
+                    onClick={() => setTransactionFilter('income')}
+                    className={cn('px-3 py-1.5 text-xs font-medium rounded-full border transition-colors', transactionFilter === 'income' ? 'bg-emerald-600 text-white border-emerald-600' : 'border-stone-200 text-stone-600 hover:border-stone-300')}
+                  >
+                    Ingresos
+                  </button>
+                  <button
+                    onClick={() => setTransactionFilter('expense')}
+                    className={cn('px-3 py-1.5 text-xs font-medium rounded-full border transition-colors', transactionFilter === 'expense' ? 'bg-red-600 text-white border-red-600' : 'border-stone-200 text-stone-600 hover:border-stone-300')}
+                  >
+                    Gastos
+                  </button>
+                </div>
+              </div>
+
+              {/* Create Transaction Form */}
+              {!showTransactionForm ? (
+                <button
+                  onClick={() => setShowTransactionForm(true)}
+                  className="mb-6 bg-stone-900 text-white px-4 py-2.5 rounded-full text-sm font-medium hover:bg-stone-800 transition-colors flex items-center gap-2"
+                >
+                  <Plus size={16} />
+                  Nuevo movimiento
+                </button>
+              ) : (
+                <div className="mb-6 p-6 rounded-2xl border border-stone-100 bg-stone-50">
+                  <h5 className="text-sm font-serif text-stone-900 mb-4">Crear movimiento</h5>
+                  {transactionError && <p className="text-xs text-red-600 bg-red-50 p-2 rounded mb-3">{transactionError}</p>}
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Tipo</p>
+                      <select
+                        value={transactionForm.direction}
+                        onChange={e => setTransactionForm(p => ({ ...p, direction: e.target.value as 'IN' | 'OUT' }))}
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                      >
+                        <option value="OUT">Gasto</option>
+                        <option value="IN">Ingreso</option>
+                      </select>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Monto</p>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={transactionForm.amount}
+                        onChange={e => setTransactionForm(p => ({ ...p, amount: e.target.value }))}
+                        placeholder="0.00"
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Fecha</p>
+                      <input
+                        type="date"
+                        value={transactionForm.date}
+                        onChange={e => setTransactionForm(p => ({ ...p, date: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Descripción</p>
+                    <input
+                      type="text"
+                      value={transactionForm.description}
+                      onChange={e => setTransactionForm(p => ({ ...p, description: e.target.value }))}
+                      placeholder="Ej: Pago de servicios"
+                      className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                    />
+                  </div>
+
+                  {transactionForm.direction === 'OUT' && (
+                    <div className="mb-3">
+                      <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Categoría de gasto</p>
+                      <select
+                        value={transactionForm.category}
+                        onChange={e => setTransactionForm(p => ({ ...p, category: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white"
+                      >
+                        <option value="">Sin categoría</option>
+                        {expenseCategories.map(cat => (
+                          <option key={cat.id} value={cat.id}>
+                            {cat.name} {cat.is_direct ? '(directo)' : '(general)'}
+                          </option>
+                        ))}
+                      </select>
+                      {transactionForm.category && (
+                        <div className="mt-2 p-2 rounded bg-stone-50 border border-stone-100">
+                          <label className="flex items-center gap-2 cursor-pointer text-xs">
+                            <input
+                              type="checkbox"
+                              checked={expenseCategories.find(c => String(c.id) === transactionForm.category)?.is_direct || false}
+                              disabled
+                              className="rounded"
+                            />
+                            <span className="text-stone-600">
+                              {expenseCategories.find(c => String(c.id) === transactionForm.category)?.is_direct ? 'Gasto directo (atribuible)' : 'Gasto general (fijo)'}
+                            </span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Método de pago</p>
+                    <select
+                      value={transactionForm.method}
+                      onChange={e => setTransactionForm(p => ({ ...p, method: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white mb-4"
+                    >
+                      <option value="cash">Efectivo</option>
+                      <option value="transfer">Transferencia</option>
+                      <option value="card">Tarjeta</option>
+                      <option value="other">Otro</option>
+                    </select>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        if (!token || !transactionForm.amount) return;
+                        setCreatingTransaction(true);
+                        setTransactionError(null);
+                        try {
+                          await createTransaction(token, {
+                            direction: transactionForm.direction,
+                            amount: transactionForm.amount,
+                            date: transactionForm.date,
+                            description: transactionForm.description,
+                            method: transactionForm.method,
+                            category: transactionForm.category ? parseInt(transactionForm.category) : undefined,
+                          });
+                          setTransactionForm({ direction: 'OUT', amount: '', date: new Date().toISOString().split('T')[0], description: '', method: 'cash', category: '' });
+                          setShowTransactionForm(false);
+                          await Promise.all([loadDetailedData(), loadBillingData(selectedMonth)]);
+                        } catch (err: any) {
+                          setTransactionError(err.message);
+                        } finally {
+                          setCreatingTransaction(false);
+                        }
+                      }}
+                      disabled={creatingTransaction || !transactionForm.amount}
+                      className="bg-stone-900 text-white text-sm px-4 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50"
+                    >
+                      {creatingTransaction ? 'Guardando...' : 'Guardar'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowTransactionForm(false);
+                        setTransactionError(null);
+                      }}
+                      className="text-sm text-stone-500 hover:text-stone-900 px-4 py-2 rounded-full transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {detailedLoading ? (
+                <div className="flex justify-center py-12">
+                  <Loader size={24} className="text-stone-300 animate-spin" />
+                </div>
+              ) : transactions.length === 0 ? (
+                <div className="text-center py-12 text-stone-400">
+                  <p className="font-serif">Sin movimientos</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-stone-100">
+                        <th className="text-left py-3 px-4 font-medium text-stone-600">Fecha</th>
+                        <th className="text-left py-3 px-4 font-medium text-stone-600">Descripción</th>
+                        <th className="text-left py-3 px-4 font-medium text-stone-600">Tipo</th>
+                        <th className="text-left py-3 px-4 font-medium text-stone-600">Método</th>
+                        <th className="text-right py-3 px-4 font-medium text-stone-600">Monto</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {transactions
+                        .filter(t => transactionFilter === 'all' || (transactionFilter === 'income' && t.direction === 'IN') || (transactionFilter === 'expense' && t.direction === 'OUT'))
+                        .map(t => (
+                          <tr key={t.id} className="border-b border-stone-50 hover:bg-stone-50 transition-colors">
+                            <td className="py-3 px-4 text-stone-600">{new Date(t.date).toLocaleDateString('es-ES')}</td>
+                            <td className="py-3 px-4 text-stone-900 font-medium">{t.description || '—'}</td>
+                            <td className="py-3 px-4">
+                              <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium', t.direction === 'IN' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700')}>
+                                {t.direction === 'IN' ? 'Ingreso' : 'Gasto'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-stone-600 text-xs capitalize">{t.method}</td>
+                            <td className="py-3 px-4 text-right font-medium">
+                              <span className={t.direction === 'IN' ? 'text-emerald-700' : 'text-red-700'}>
+                                {t.direction === 'IN' ? '+' : '−'}${parseFloat(t.amount).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Documents Tab */}
+          {billingTab === 'documents' && (
+            <div className="space-y-6">
+              {/* Period selector */}
+              <div className="flex items-center justify-end gap-2">
+                <div className="flex rounded-full border border-stone-200 p-0.5">
+                  <button
+                    onClick={() => setSummaryView('month')}
+                    className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'month' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                  >
+                    Mes
+                  </button>
+                  <button
+                    onClick={() => setSummaryView('year')}
+                    className={cn('px-3 py-1 text-xs font-medium rounded-full transition-colors', summaryView === 'year' ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+                  >
+                    Año
+                  </button>
+                </div>
+                {summaryView === 'month' ? (
+                  <input
+                    type="month"
+                    value={selectedMonth}
+                    onChange={e => setSelectedMonth(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                  />
+                ) : (
+                  <input
+                    type="number"
+                    value={selectedYear}
+                    onChange={e => setSelectedYear(Number(e.target.value))}
+                    className="w-24 px-3 py-1.5 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                  />
+                )}
+              </div>
+
+              {/* Órdenes sin pagar */}
+              <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+                <h4 className="text-lg font-serif text-stone-900 mb-6">Órdenes sin pagar</h4>
+                {detailedLoading ? (
+                  <div className="flex justify-center py-12">
+                    <Loader size={24} className="text-stone-300 animate-spin" />
+                  </div>
+                ) : unpaidOrders.length === 0 ? (
+                  <div className="text-center py-12 text-stone-400">
+                    <p className="font-serif">Sin órdenes pendientes de pago</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-stone-100">
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Cliente</th>
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Servicios</th>
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Fecha</th>
+                          <th className="text-right py-3 px-4 font-medium text-stone-600">Total</th>
+                          <th className="text-right py-3 px-4 font-medium text-stone-600">Saldo</th>
+                          <th className="text-right py-3 px-4 font-medium text-stone-600">Acciones</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unpaidOrders.map(o => (
+                          <tr key={o.id} className="border-b border-stone-50 hover:bg-stone-50 transition-colors">
+                            <td className="py-3 px-4 font-medium text-stone-900">{o.customer_name}</td>
+                            <td className="py-3 px-4 text-stone-600">{o.items.map(i => i.product_name).join(', ') || '—'}</td>
+                            <td className="py-3 px-4 text-stone-600">{o.booking_date ? new Date(o.booking_date).toLocaleDateString('es-ES') : new Date(o.created_at).toLocaleDateString('es-ES')}</td>
+                            <td className="py-3 px-4 text-right font-medium">${parseFloat(o.total).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                            <td className="py-3 px-4 text-right font-medium text-amber-700">
+                              ${parseFloat(o.balance_due).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                              {parseFloat(o.amount_paid) > 0 && (
+                                <span className="block text-xs text-stone-400 font-normal">${parseFloat(o.amount_paid).toLocaleString('es-ES', { minimumFractionDigits: 2 })} abonado</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex flex-col items-end gap-1.5">
+                                {payingOrderId === o.id ? (
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      autoFocus
+                                      placeholder={o.balance_due}
+                                      value={orderPaymentAmount}
+                                      onChange={e => setOrderPaymentAmount(e.target.value)}
+                                      className="w-20 px-2 py-1 rounded-lg border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                                    />
+                                    <button
+                                      disabled={savingOrderPayment}
+                                      onClick={() => handleRegisterOrderPayment(o)}
+                                      className="text-xs bg-stone-900 text-white px-2.5 py-1 rounded-lg hover:bg-stone-800 disabled:opacity-50"
+                                    >
+                                      {savingOrderPayment ? '…' : 'OK'}
+                                    </button>
+                                    <button
+                                      onClick={() => { setPayingOrderId(null); setOrderPaymentAmount(''); }}
+                                      className="text-xs text-stone-400 hover:text-stone-600 px-1"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                ) : o.is_fully_paid ? (
+                                  <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-emerald-100 text-emerald-700">Pagado</span>
+                                ) : (
+                                  <button
+                                    onClick={() => { setPayingOrderId(o.id); setOrderPaymentAmount(o.balance_due); }}
+                                    className="text-xs text-stone-600 hover:text-stone-900 px-2.5 py-1 rounded-full border border-stone-200 hover:border-stone-300 transition-colors whitespace-nowrap"
+                                  >
+                                    Registrar pago
+                                  </button>
+                                )}
+                                <button
+                                  disabled={closingOrderId === o.id}
+                                  onClick={() => handleCloseOrder(o.id)}
+                                  className="text-xs text-stone-400 hover:text-stone-700 px-2.5 py-1 rounded-full border border-transparent hover:border-stone-200 transition-colors whitespace-nowrap disabled:opacity-50"
+                                >
+                                  {closingOrderId === o.id ? 'Cerrando…' : 'Cerrar orden'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Recibos: órdenes cerradas (status = completed) */}
+              <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+                <h4 className="text-lg font-serif text-stone-900 mb-6">Recibos</h4>
+                {detailedLoading ? (
+                  <div className="flex justify-center py-12">
+                    <Loader size={24} className="text-stone-300 animate-spin" />
+                  </div>
+                ) : closedOrders.length === 0 ? (
+                  <div className="text-center py-12 text-stone-400">
+                    <p className="font-serif">Sin órdenes cerradas este período</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-stone-100">
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Cliente</th>
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Servicios</th>
+                          <th className="text-left py-3 px-4 font-medium text-stone-600">Fecha</th>
+                          <th className="text-right py-3 px-4 font-medium text-stone-600">Total</th>
+                          <th className="text-right py-3 px-4 font-medium text-stone-600">Pago</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {closedOrders.map(o => (
+                          <tr key={o.id} className="border-b border-stone-50 hover:bg-stone-50 transition-colors">
+                            <td className="py-3 px-4 font-medium text-stone-900">{o.customer_name}</td>
+                            <td className="py-3 px-4 text-stone-600">{o.items.map(i => i.product_name).join(', ') || '—'}</td>
+                            <td className="py-3 px-4 text-stone-600">{o.booking_date ? new Date(o.booking_date).toLocaleDateString('es-ES') : new Date(o.created_at).toLocaleDateString('es-ES')}</td>
+                            <td className="py-3 px-4 text-right font-medium">${parseFloat(o.total).toLocaleString('es-ES', { minimumFractionDigits: 2 })}</td>
+                            <td className="py-3 px-4 text-right">
+                              {o.is_fully_paid ? (
+                                <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-emerald-100 text-emerald-700">Pagado</span>
+                              ) : (
+                                <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-100 text-amber-700">
+                                  Saldo ${parseFloat(o.balance_due).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Reports Tab */}
+          {billingTab === 'reports' && (
+            <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+              <h4 className="text-lg font-serif text-stone-900 mb-6">Reportes</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Top Customers */}
+                <div>
+                  <h5 className="text-sm font-medium text-stone-600 mb-4">Clientes principales</h5>
+                  {detailedLoading ? (
+                    <div className="flex justify-center py-8">
+                      <Loader size={20} className="text-stone-300 animate-spin" />
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {receipts
+                        .reduce((acc, r) => {
+                          const existing = acc.find(x => x.name === r.customer_name);
+                          if (existing) {
+                            existing.amount = (parseFloat(existing.amount) + parseFloat(r.total)).toString();
+                            existing.count++;
+                          } else {
+                            acc.push({ name: r.customer_name, amount: r.total, count: 1 });
+                          }
+                          return acc;
+                        }, [] as any[])
+                        .sort((a, b) => parseFloat(b.amount) - parseFloat(a.amount))
+                        .slice(0, 5)
+                        .map((c, i) => (
+                          <div key={i} className="flex items-center justify-between p-3 rounded-lg border border-stone-100 hover:border-stone-300 transition-colors">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-stone-900 truncate">{c.name}</p>
+                              <p className="text-xs text-stone-400">{c.count} {c.count === 1 ? 'recibo' : 'recibos'}</p>
+                            </div>
+                            <p className="text-sm font-medium text-emerald-700 ml-2">
+                              ${parseFloat(c.amount).toLocaleString('es-ES', { minimumFractionDigits: 2 })}
+                            </p>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Sync Section */}
+                <div>
+                  <h5 className="text-sm font-medium text-stone-600 mb-4">Sincronización</h5>
+                  <div className="p-4 rounded-2xl border-2 border-dashed border-stone-200 bg-stone-50">
+                    {syncMessage && (
+                      <div className="mb-4 p-3 rounded-lg bg-emerald-50 border border-emerald-200">
+                        <p className="text-sm text-emerald-700 font-medium">{syncMessage}</p>
+                      </div>
+                    )}
+                    <p className="text-sm text-stone-600 mb-4">
+                      Envía un resumen de tus facturas y movimientos a EsfuerzoVZ para mantener sincronizados tus datos financieros.
+                    </p>
+                    <button
+                      onClick={async () => {
+                        if (!token) return;
+                        setSyncing(true);
+                        try {
+                          const today = new Date();
+                          const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                          const periodStart = firstDay.toISOString().split('T')[0];
+                          const periodEnd = today.toISOString().split('T')[0];
+
+                          const result = await syncToEVZ(token, periodStart, periodEnd);
+                          setSyncMessage(`✓ ${result.status || 'Datos sincronizados'} exitosamente con EsfuerzoVZ`);
+                          setTimeout(() => setSyncMessage(null), 5000);
+                        } catch (err: any) {
+                          setSyncMessage(`✗ Error: ${err.message}`);
+                        } finally {
+                          setSyncing(false);
+                        }
+                      }}
+                      disabled={syncing}
+                      className="w-full bg-stone-900 text-white px-4 py-2.5 rounded-full text-sm font-medium hover:bg-stone-800 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {syncing ? (
+                        <>
+                          <Loader size={16} className="animate-spin" />
+                          Sincronizando...
+                        </>
+                      ) : (
+                        <>
+                          <Upload size={16} />
+                          Sincronizar con EsfuerzoVZ
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

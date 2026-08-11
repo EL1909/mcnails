@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.db.models import F
 from .models import Category, Product, Order, OrderItem
 from .serializers import CategorySerializer, ProductSerializer, OrderSerializer
 
@@ -89,3 +90,49 @@ class OrderViewSet(viewsets.ModelViewSet):
         order.payment_method = request.data.get('payment_method', 'MANUAL')
         order.save()
         return Response({'status': 'confirmed'})
+
+    @action(detail=False, methods=['get'])
+    def customers(self, request):
+        """Devuelve clientes únicos de órdenes con estadísticas agregadas."""
+        from django.db.models import Count, Sum, Min, Max, DecimalField
+        from django.db.models.functions import Coalesce
+        from decimal import Decimal
+
+        customers_data = {}
+
+        # Recorrer todas las órdenes y agrupar por email o nombre
+        for order in self.queryset.prefetch_related('items'):
+            key = order.customer_email if order.customer_email else order.customer_name
+
+            # Calcular total de la orden
+            order_total = sum(item.subtotal for item in order.items.all())
+
+            if key not in customers_data:
+                customers_data[key] = {
+                    'email': order.customer_email,
+                    'name': order.customer_name,
+                    'order_count': 0,
+                    'total_spent': Decimal('0.00'),
+                    'first_order_date': order.created_at.date(),
+                    'last_order_date': order.created_at.date(),
+                }
+
+            customer = customers_data[key]
+            customer['order_count'] += 1
+            customer['total_spent'] += Decimal(str(order_total))
+            customer['first_order_date'] = min(customer['first_order_date'], order.created_at.date())
+            customer['last_order_date'] = max(customer['last_order_date'], order.created_at.date())
+
+        # Convertir a lista y formatear
+        result = []
+        for customer in customers_data.values():
+            result.append({
+                'email': customer['email'],
+                'name': customer['name'] or 'Sin nombre',
+                'order_count': customer['order_count'],
+                'total_spent': str(customer['total_spent'].quantize(Decimal('0.01'))),
+                'first_order_date': customer['first_order_date'].isoformat(),
+                'last_order_date': customer['last_order_date'].isoformat(),
+            })
+
+        return Response(result)

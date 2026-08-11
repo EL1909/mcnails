@@ -13,7 +13,9 @@
   "dependencies": {
     "@fullcalendar/core": "^6.1.20",
     "@fullcalendar/daygrid": "^6.1.20",
+    "@fullcalendar/interaction": "^6.1.21",
     "@fullcalendar/list": "^6.1.20",
+    "@fullcalendar/moment-timezone": "^6.1.21",
     "@fullcalendar/react": "^6.1.20",
     "@fullcalendar/timegrid": "^6.1.20",
     "@google/genai": "^1.29.0",
@@ -24,6 +26,7 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
+    "moment-timezone": "^0.5.48",
     "motion": "^12.23.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

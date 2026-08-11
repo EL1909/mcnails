@@ -28,11 +28,27 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     total = serializers.ReadOnlyField(source='total_amount')
+    amount_paid = serializers.SerializerMethodField()
+    balance_due = serializers.SerializerMethodField()
+    is_fully_paid = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
             'id', 'customer_name', 'customer_email', 'customer_phone',
             'status', 'booking_date', 'booking_time', 'payment_method',
-            'created_at', 'items', 'total'
+            'created_at', 'items', 'total',
+            'amount_paid', 'balance_due', 'is_fully_paid',
         ]
+
+    def get_amount_paid(self, obj):
+        from evz_treasury import services
+        return str(services.amount_paid(obj))
+
+    def get_balance_due(self, obj):
+        from evz_treasury import services
+        return str(services.balance_due(obj))
+
+    def get_is_fully_paid(self, obj):
+        from evz_treasury import services
+        return services.is_fully_paid(obj)

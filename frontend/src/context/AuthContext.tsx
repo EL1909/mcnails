@@ -9,6 +9,7 @@ export interface User {
   is_staff: boolean;
   is_superuser: boolean;
   is_verified: boolean;
+  profile?: { phone: string; profile_picture: string | null; notes: string };
 }
 
 interface AuthContextType {

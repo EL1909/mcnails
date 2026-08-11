@@ -56,6 +56,9 @@ export interface Order {
   booking_time: string | null;
   created_at: string;
   total: string;
+  amount_paid: string;
+  balance_due: string;
+  is_fully_paid: boolean;
   items: { id: number; product_name: string; quantity: number; price_at_purchase: string }[];
 }
 
@@ -108,6 +111,16 @@ export const fetchOrders = async (token: string): Promise<Order[]> => {
     headers: authHeader(token),
   });
   if (!res.ok) throw new Error('Error al cargar las órdenes');
+  return res.json();
+};
+
+export const updateOrderStatus = async (token: string, id: number, status: string): Promise<Order> => {
+  const res = await fetch(`${API_BASE}/orders/${id}/`, {
+    method: 'PATCH',
+    headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) throw new Error('Error al actualizar la orden');
   return res.json();
 };
 

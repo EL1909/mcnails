@@ -11,6 +11,9 @@ import re
 import zoneinfo
 
 from django.conf import settings
+from django.db.models import Q
+
+from evz_core.models import TeamMember
 
 from .models import Appointment, CalendarSettings, TimeBlock, WeeklySchedule
 from .services import GoogleCalendarService
@@ -53,21 +56,24 @@ def slot_minutes_for(products):
     return total or DEFAULT_SLOT_MINUTES
 
 
-def day_window(date):
+def day_window(date, team_member):
     """
-    Apertura y cierre de ese día, en hora del negocio.
+    Apertura y cierre de ese día para ese miembro del equipo, en hora del
+    negocio.
 
-    Devuelve (None, None) si el negocio está cerrado.
+    Devuelve (None, None) si esa persona no trabaja ese día.
     """
     tz = business_tz()
-    horario = WeeklySchedule.objects.filter(weekday=date.weekday()).first()
+    horario = WeeklySchedule.objects.filter(
+        team_member=team_member, weekday=date.weekday(),
+    ).first()
 
     if horario is not None:
         if not horario.is_open:
             return None, None
         abre, cierra = horario.opens_at, horario.closes_at
     else:
-        # Sin horario configurado para ese día se usa el general.
+        # Sin horario propio configurado se usa el general del negocio.
         cfg = CalendarSettings.load()
         abre, cierra = cfg.working_hours_start, cfg.working_hours_end
 
@@ -77,11 +83,16 @@ def day_window(date):
     )
 
 
-def busy_intervals(date, day_start, day_end, buffer):
-    """Todo lo que ocupa agenda ese día: citas, bloqueos y Google Calendar."""
+def busy_intervals(date, day_start, day_end, buffer, team_member):
+    """
+    Todo lo que ocupa la agenda de esa persona ese día: sus citas, sus
+    bloqueos personales, los bloqueos de todo el negocio (team_member nulo) y
+    Google Calendar.
+    """
     ocupado = []
 
     for appt in Appointment.objects.filter(
+        team_member=team_member,
         start_time__lt=day_end, end_time__gt=day_start,
         status__in=['pending', 'confirmed'],
     ):
@@ -90,7 +101,10 @@ def busy_intervals(date, day_start, day_end, buffer):
             'end': appt.end_time + buffer,
         })
 
-    for bloque in TimeBlock.objects.filter(start__lt=day_end, end__gt=day_start):
+    for bloque in TimeBlock.objects.filter(
+        Q(team_member=team_member) | Q(team_member__isnull=True),
+        start__lt=day_end, end__gt=day_start,
+    ):
         ocupado.append({'start': bloque.start, 'end': bloque.end})
 
     cfg = CalendarSettings.load()
@@ -105,13 +119,14 @@ def busy_intervals(date, day_start, day_end, buffer):
     return ocupado
 
 
-def available_slots(date, products=None):
+def available_slots(date, team_member, products=None):
     """
-    Turnos libres de un día para el conjunto de servicios pedido.
+    Turnos libres de un día de un miembro del equipo, para el conjunto de
+    servicios pedido.
 
     `products`: lista de Product. La duración del turno es la suma de todos.
     """
-    day_start, day_end = day_window(date)
+    day_start, day_end = day_window(date, team_member)
     if day_start is None:
         return {
             'date': date.isoformat(),
@@ -123,7 +138,7 @@ def available_slots(date, products=None):
     minutos = slot_minutes_for(products or [])
     cfg = CalendarSettings.load()
     buffer = datetime.timedelta(minutes=cfg.buffer_minutes)
-    ocupado = busy_intervals(date, day_start, day_end, buffer)
+    ocupado = busy_intervals(date, day_start, day_end, buffer, team_member)
 
     paso = datetime.timedelta(minutes=minutos)
     inicio = day_start
@@ -149,9 +164,38 @@ def available_slots(date, products=None):
     }
 
 
-def is_slot_free(start, end, exclude_appointment_id=None):
+def available_slots_any(date, products=None):
     """
-    ¿Cabe una cita en este rango?
+    Turnos libres del día combinando a todo el equipo activo: un turno
+    aparece si AL MENOS una persona está libre ahí.
+
+    Se usa cuando la clienta no elige con quién reservar ("cualquiera
+    disponible") — a la hora de confirmar, find_available_team_member()
+    resuelve quién queda asignada.
+    """
+    vistos = {}
+    alguien_abre = False
+    minutos = slot_minutes_for(products or [])
+
+    for tm in TeamMember.objects.filter(is_active=True):
+        resultado = available_slots(date, tm, products)
+        if not resultado['closed']:
+            alguien_abre = True
+        for slot in resultado['slots']:
+            vistos.setdefault(slot['start'], slot)
+
+    return {
+        'date': date.isoformat(),
+        'closed': not alguien_abre,
+        'slot_minutes': minutos,
+        'timezone': settings.TIME_ZONE,
+        'slots': sorted(vistos.values(), key=lambda s: s['start']),
+    }
+
+
+def is_slot_free(start, end, team_member, exclude_appointment_id=None):
+    """
+    ¿Cabe una cita en este rango para esta persona?
 
     Se usa al crear, para que dos personas reservando a la vez no terminen
     con el mismo turno: la disponibilidad que vio el navegador pudo quedar
@@ -161,6 +205,7 @@ def is_slot_free(start, end, exclude_appointment_id=None):
     buffer = datetime.timedelta(minutes=cfg.buffer_minutes)
 
     citas = Appointment.objects.filter(
+        team_member=team_member,
         start_time__lt=end + buffer,
         end_time__gt=start - buffer,
         status__in=['pending', 'confirmed'],
@@ -170,13 +215,30 @@ def is_slot_free(start, end, exclude_appointment_id=None):
     if citas.exists():
         return False, "Ese horario ya está reservado."
 
-    if TimeBlock.objects.filter(start__lt=end, end__gt=start).exists():
+    if TimeBlock.objects.filter(
+        Q(team_member=team_member) | Q(team_member__isnull=True),
+        start__lt=end, end__gt=start,
+    ).exists():
         return False, "Ese horario está bloqueado en la agenda."
 
-    day_start, day_end = day_window(start.astimezone(business_tz()).date())
+    day_start, day_end = day_window(start.astimezone(business_tz()).date(), team_member)
     if day_start is None:
-        return False, "El negocio está cerrado ese día."
+        return False, "Esa persona no atiende ese día."
     if start < day_start or end > day_end:
         return False, "Ese horario queda fuera del horario de atención."
 
     return True, None
+
+
+def find_available_team_member(start, end, exclude_appointment_id=None):
+    """
+    Primer miembro del equipo activo sin choque de horario en ese rango.
+
+    Se usa para asignar automáticamente cuando la clienta reserva sin elegir
+    con quién ("cualquiera disponible"). Devuelve None si nadie está libre.
+    """
+    for tm in TeamMember.objects.filter(is_active=True):
+        libre, _ = is_slot_free(start, end, tm, exclude_appointment_id)
+        if libre:
+            return tm
+    return None

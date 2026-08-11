@@ -1,6 +1,10 @@
 from decimal import Decimal
 
+from django.core.files.uploadedfile import UploadedFile
 from django.db import models
+
+from evz_core.models import TeamMember
+from evz_core.utils import compress_if_image
 
 
 def receipt_attachment_path(instance, filename):
@@ -83,6 +87,14 @@ class Transaction(models.Model):
         related_name='payments'
     )
 
+    # Solo para filtrar reportes por persona. Un ingreso lo hereda de su
+    # Order; un gasto manual (sin order) queda opcional — no todo gasto es
+    # atribuible a alguien del equipo (ej. alquiler).
+    team_member = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transactions',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = TransactionQuerySet.as_manager()
@@ -96,6 +108,14 @@ class Transaction(models.Model):
     def __str__(self):
         signo = '+' if self.direction == Direction.IN else '−'
         return f"{signo}{self.amount} · {self.description or self.get_direction_display()}"
+
+    def save(self, *args, **kwargs):
+        # El comprobante admite PDF además de fotos (factura escaneada), por
+        # eso es FileField y no ImageField: compress_if_image deja pasar el
+        # PDF intacto y solo reduce cuando de verdad es una imagen.
+        if self.attachment and isinstance(self.attachment.file, UploadedFile):
+            self.attachment = compress_if_image(self.attachment, quality=80)
+        super().save(*args, **kwargs)
 
     @property
     def is_automatic(self):

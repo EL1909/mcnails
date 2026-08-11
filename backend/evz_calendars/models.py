@@ -2,6 +2,7 @@ from datetime import time
 
 from django.db import models
 
+from evz_core.models import TeamMember
 from evz_store.models import Order, Product
 
 
@@ -62,13 +63,19 @@ class Weekday(models.IntegerChoices):
 
 class WeeklySchedule(models.Model):
     """
-    Horario de un día de la semana.
+    Horario de un día de la semana, por miembro del equipo.
 
     Sin esto la agenda ofrecía slots los siete días con el mismo horario, así
-    que un salón cerrado los domingos igual mostraba turnos disponibles.
+    que un salón cerrado los domingos igual mostraba turnos disponibles. El
+    horario es por team_member (no global) porque cada quien puede trabajar
+    días y horas distintas.
     """
 
-    weekday = models.IntegerField(choices=Weekday.choices, unique=True)
+    team_member = models.ForeignKey(
+        TeamMember, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='weekly_schedule',
+    )
+    weekday = models.IntegerField(choices=Weekday.choices)
     is_open = models.BooleanField(default=True, verbose_name="Abierto")
     opens_at = models.TimeField(default=time(9, 0))
     closes_at = models.TimeField(default=time(19, 0))
@@ -76,7 +83,8 @@ class WeeklySchedule(models.Model):
     class Meta:
         verbose_name = "Horario semanal"
         verbose_name_plural = "Horario semanal"
-        ordering = ('weekday',)
+        ordering = ('team_member', 'weekday')
+        unique_together = ('team_member', 'weekday')
 
     def __str__(self):
         if not self.is_open:
@@ -106,6 +114,12 @@ class TimeBlock(models.Model):
         MAINTENANCE = 'maintenance', 'Mantenimiento'
         OTHER = 'other', 'Otro'
 
+    # Vacío = bloqueo de todo el negocio (ej. feriado); asignado = ausencia
+    # personal de ese miembro del equipo.
+    team_member = models.ForeignKey(
+        TeamMember, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='time_blocks',
+    )
     start = models.DateTimeField()
     end = models.DateTimeField()
     reason = models.CharField(max_length=20, choices=Reason.choices, default=Reason.OTHER)
@@ -138,6 +152,13 @@ class Appointment(models.Model):
     order = models.OneToOneField(
         Order, on_delete=models.CASCADE,
         related_name='appointment', null=True, blank=True
+    )
+    # Nullable a nivel de BD para no romper citas existentes o creadas antes
+    # de elegir team_member; los flujos de creación (fases siguientes) la
+    # exigen en la práctica.
+    team_member = models.ForeignKey(
+        TeamMember, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='appointments',
     )
     customer_name = models.CharField(max_length=255)
     customer_email = models.EmailField(blank=True)
