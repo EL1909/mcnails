@@ -1,7 +1,0 @@
-Hola {{ appointment.customer_name }},
-
-Tu cita en {{ business_name }} del {{ date_label }} a las {{ time_label }} fue cancelada.
-
-Si fue un error o quieres reagendar, respóndenos a este correo.
-
-{{ business_name }}

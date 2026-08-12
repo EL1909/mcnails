@@ -8,6 +8,7 @@ Django==5.2
 django-cors-headers==4.9.0
 djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
+evz-backbone @ git+ssh://git@github.com/EL1909/evz_backbone.git@v1.0.0
 google-api-core==2.30.1
 google-api-python-client==2.193.0
 google-auth==2.49.1
