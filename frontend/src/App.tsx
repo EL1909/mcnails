@@ -30,13 +30,21 @@ import {
   Filter,
   FileText,
   Upload,
+  ArrowLeft,
+  ExternalLink,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
 import { fetchProducts, fetchAdminProducts, fetchAdminCategories, createProduct, updateProduct, deleteProduct, createCategory, fetchOrders, updateOrderStatus, type Product, type Category, type Order } from './api/store';
 import { fetchUsers, adminCreateUser, adminUpdateUser, fetchOrderCustomers, type ClientUser, type Customer } from './api/auth';
 import { fetchAvailability, createAppointment, createAppointmentAdmin, fetchAppointments, fetchAppointmentsBilling, updateAppointment, deleteAppointment, fetchWeeklySchedule, saveWeeklyScheduleDay, fetchTimeBlocks, createTimeBlock, deleteTimeBlock, type AppointmentPayload, type TimeSlot, type CalendarEvent, type AppointmentBilling, type WeeklySchedule, type TimeBlock } from './api/calendar';
-import { fetchTeamMembers, fetchMyTeamMember, fetchAllTeamMembers, createTeamMember, updateTeamMember, type TeamMemberPublic, type TeamMemberAdmin } from './api/business';
+import { fetchTeamMembers, fetchMyTeamMember, fetchAllTeamMembers, createTeamMember, updateTeamMember, fetchBusinessProfile, updateBusinessProfile, type TeamMemberPublic, type TeamMemberAdmin, type BusinessProfileAdmin } from './api/business';
+import {
+  fetchPublicProjects, fetchAllProjects, createProject, updateProject, deleteProject,
+  addProjectPhoto, deleteProjectPhoto,
+  fetchPublicReviews, submitReview, fetchAllReviews, setReviewVerified, deleteReview,
+  type WebsiteProject, type Review as ShowcaseReview, type ReviewSubmission,
+} from './api/showcase';
 import { fetchBillingCounts, fetchReceipts, voidReceipt, issueReceipt } from './api/billing';
 import { fetchMonthlyStats, fetchTransactions, syncToEVZ, createTransaction, fetchExpenseCategories, createExpenseCategory, updateTransactionCategory, recordOrderPayment, fetchYearlySummary, type ExpenseCategory, type Transaction, type YearlySummaryData } from './api/treasury';
 import FullCalendar from '@fullcalendar/react';
@@ -67,14 +75,6 @@ type Service = {
   image: string;
 };
 
-interface Review {
-  id: string;
-  user: string;
-  rating: number;
-  comment: string;
-  date: string;
-}
-
 const FALLBACK_IMAGE = 'https://picsum.photos/seed/nails-default/400/300';
 
 function mapProductToService(p: Product): Service {
@@ -87,21 +87,6 @@ function mapProductToService(p: Product): Service {
     image: p.image ?? FALLBACK_IMAGE,
   };
 }
-
-const REVIEWS: Review[] = [
-  { id: '1', user: 'Valeria M.', rating: 5, comment: 'La mejor atención, mis uñas quedaron impecables y duraron muchísimo.', date: 'Hace 2 días' },
-  { id: '2', user: 'Camila R.', rating: 5, comment: 'Excelente técnica, muy profesional y el lugar es hermoso.', date: 'Hace 1 semana' },
-  { id: '3', user: 'Sofía G.', rating: 4, comment: 'Me encantó el diseño de Soft Gel, súper recomendado.', date: 'Hace 2 semanas' },
-];
-
-const GALLERY = [
-  'https://picsum.photos/seed/g1/600/800',
-  'https://picsum.photos/seed/g2/600/600',
-  'https://picsum.photos/seed/g3/800/600',
-  'https://picsum.photos/seed/g4/600/800',
-  'https://picsum.photos/seed/g5/600/600',
-  'https://picsum.photos/seed/g6/800/600',
-];
 
 // --- Components ---
 
@@ -351,70 +336,167 @@ const ServicesSection = ({ services, onSelect }: { services: Service[], onSelect
   </section>
 );
 
-const GallerySection = () => (
-  <section className="py-24">
-    <div className="max-w-7xl mx-auto px-4">
-      <div className="flex justify-between items-end mb-16">
-        <div>
-          <h2 className="text-4xl md:text-5xl font-serif mb-4">Portafolio</h2>
-          <p className="text-stone-500">Inspiración para tu próxima cita.</p>
-        </div>
-        <button className="text-stone-900 font-semibold flex items-center gap-2 hover:underline">
-          Ver Instagram <Instagram size={20} />
-        </button>
-      </div>
-      <div className="columns-1 md:columns-2 lg:columns-3 gap-8 space-y-8">
-        {GALLERY.map((img, idx) => (
-          <motion.div
-            key={idx}
-            initial={{ opacity: 0, scale: 0.95 }}
-            whileInView={{ opacity: 1, scale: 1 }}
-            viewport={{ once: true }}
-            className="rounded-3xl overflow-hidden shadow-md"
-          >
-            <img src={img} alt={`Gallery ${idx}`} className="w-full h-auto object-cover hover:scale-105 transition-transform duration-700" referrerPolicy="no-referrer" />
-          </motion.div>
-        ))}
-      </div>
-    </div>
-  </section>
-);
+const GallerySection = () => {
+  const [projects, setProjects] = useState<WebsiteProject[]>([]);
 
-const ReviewsSection = () => (
-  <section className="py-24 bg-stone-900 text-white overflow-hidden relative">
-    <div className="absolute top-0 right-0 w-96 h-96 bg-stone-800 rounded-full blur-[100px] -mr-48 -mt-48 opacity-50"></div>
-    <div className="max-w-7xl mx-auto px-4 relative z-10">
-      <div className="text-center mb-16">
-        <h2 className="text-4xl md:text-5xl font-serif mb-4">Lo que dicen nuestras clientas</h2>
-        <div className="flex justify-center gap-1 mb-4">
-          {[1, 2, 3, 4, 5].map(i => <Star key={i} size={20} className="fill-white text-white" />)}
-        </div>
-        <p className="text-stone-400">Más de 500 citas exitosas este año.</p>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        {REVIEWS.map((review) => (
-          <div key={review.id} className="bg-stone-800/50 p-8 rounded-3xl border border-stone-700">
-            <div className="flex gap-1 mb-4">
-              {[1, 2, 3, 4, 5].map(i => (
-                <Star key={i} size={14} className={cn(i <= review.rating ? "fill-white text-white" : "text-stone-600")} />
-              ))}
-            </div>
-            <p className="text-lg italic mb-6">"{review.comment}"</p>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-stone-700 rounded-full flex items-center justify-center font-bold text-sm">
-                {review.user[0]}
-              </div>
-              <div>
-                <p className="font-semibold text-sm">{review.user}</p>
-                <p className="text-xs text-stone-500">{review.date}</p>
-              </div>
-            </div>
+  useEffect(() => {
+    fetchPublicProjects().then(setProjects).catch(() => setProjects([]));
+  }, []);
+
+  if (projects.length === 0) return null;
+
+  return (
+    <section className="py-24">
+      <div className="max-w-7xl mx-auto px-4">
+        <div className="flex justify-between items-end mb-16">
+          <div>
+            <h2 className="text-4xl md:text-5xl font-serif mb-4">Portafolio</h2>
+            <p className="text-stone-500">Inspiración para tu próxima cita.</p>
           </div>
-        ))}
+          <button className="text-stone-900 font-semibold flex items-center gap-2 hover:underline">
+            Ver Instagram <Instagram size={20} />
+          </button>
+        </div>
+        <div className="columns-1 md:columns-2 lg:columns-3 gap-8 space-y-8">
+          {projects.filter(p => p.image).map((project) => (
+            <motion.div
+              key={project.id}
+              initial={{ opacity: 0, scale: 0.95 }}
+              whileInView={{ opacity: 1, scale: 1 }}
+              viewport={{ once: true }}
+              className="rounded-3xl overflow-hidden shadow-md relative group"
+            >
+              <img src={project.image!} alt={project.title} className="w-full h-auto object-cover group-hover:scale-105 transition-transform duration-700" referrerPolicy="no-referrer" />
+              {(project.title || project.estimated_price) && (
+                <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/60 to-transparent text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                  <p className="font-serif text-lg">{project.title}</p>
+                  {project.estimated_price && <p className="text-sm text-stone-200">Desde ${parseFloat(project.estimated_price).toLocaleString('es-ES')}</p>}
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </div>
       </div>
-    </div>
-  </section>
-);
+    </section>
+  );
+};
+
+const ReviewsSection = () => {
+  const [reviews, setReviews] = useState<ShowcaseReview[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ author_name: '', author_location: '', rating: 5, comment: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => fetchPublicReviews().then(setReviews).catch(() => setReviews([]));
+  useEffect(() => { load(); }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.author_name || !form.comment) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const payload: ReviewSubmission = {
+        author_name: form.author_name,
+        author_location: form.author_location,
+        rating: form.rating,
+        comment: form.comment,
+        date: new Date().toISOString().split('T')[0],
+      };
+      await submitReview(payload);
+      setSubmitted(true);
+      setForm({ author_name: '', author_location: '', rating: 5, comment: '' });
+    } catch (err: any) {
+      setError(err.message || 'Error al enviar tu reseña');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="py-24 bg-stone-900 text-white overflow-hidden relative">
+      <div className="absolute top-0 right-0 w-96 h-96 bg-stone-800 rounded-full blur-[100px] -mr-48 -mt-48 opacity-50"></div>
+      <div className="max-w-7xl mx-auto px-4 relative z-10">
+        <div className="text-center mb-16">
+          <h2 className="text-4xl md:text-5xl font-serif mb-4">Lo que dicen nuestras clientas</h2>
+          <div className="flex justify-center gap-1 mb-4">
+            {[1, 2, 3, 4, 5].map(i => <Star key={i} size={20} className="fill-white text-white" />)}
+          </div>
+        </div>
+
+        {reviews.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-16">
+            {reviews.map((review) => (
+              <div key={review.id} className="bg-stone-800/50 p-8 rounded-3xl border border-stone-700">
+                <div className="flex gap-1 mb-4">
+                  {[1, 2, 3, 4, 5].map(i => (
+                    <Star key={i} size={14} className={cn(i <= review.rating ? "fill-white text-white" : "text-stone-600")} />
+                  ))}
+                </div>
+                <p className="text-lg italic mb-6">"{review.comment}"</p>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-stone-700 rounded-full flex items-center justify-center font-bold text-sm">
+                    {review.author_name[0]}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">{review.author_name}</p>
+                    {review.author_location && <p className="text-xs text-stone-500">{review.author_location}</p>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="max-w-lg mx-auto text-center">
+          {submitted ? (
+            <p className="text-stone-300">¡Gracias por tu reseña! Se publicará una vez aprobada.</p>
+          ) : showForm ? (
+            <form onSubmit={handleSubmit} className="bg-stone-800/50 p-8 rounded-3xl border border-stone-700 text-left space-y-3">
+              {error && <p className="text-sm text-red-300 bg-red-950/50 rounded-lg px-3 py-2">{error}</p>}
+              <input
+                required placeholder="Tu nombre" value={form.author_name}
+                onChange={e => setForm(p => ({ ...p, author_name: e.target.value }))}
+                className="w-full p-3 rounded-xl bg-stone-900 border border-stone-700 text-sm focus:outline-none focus:border-stone-500"
+              />
+              <input
+                placeholder="Ciudad (opcional)" value={form.author_location}
+                onChange={e => setForm(p => ({ ...p, author_location: e.target.value }))}
+                className="w-full p-3 rounded-xl bg-stone-900 border border-stone-700 text-sm focus:outline-none focus:border-stone-500"
+              />
+              <div className="flex gap-1 justify-center py-1">
+                {[1, 2, 3, 4, 5].map(i => (
+                  <button type="button" key={i} onClick={() => setForm(p => ({ ...p, rating: i }))}>
+                    <Star size={22} className={cn(i <= form.rating ? "fill-white text-white" : "text-stone-600")} />
+                  </button>
+                ))}
+              </div>
+              <textarea
+                required rows={3} placeholder="Contanos tu experiencia..." value={form.comment}
+                onChange={e => setForm(p => ({ ...p, comment: e.target.value }))}
+                className="w-full p-3 rounded-xl bg-stone-900 border border-stone-700 text-sm focus:outline-none focus:border-stone-500 resize-none"
+              />
+              <div className="flex gap-2">
+                <button type="submit" disabled={submitting} className="flex-1 bg-white text-stone-900 py-2.5 rounded-xl font-semibold text-sm disabled:opacity-50">
+                  {submitting ? 'Enviando…' : 'Enviar reseña'}
+                </button>
+                <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2.5 rounded-xl text-sm text-stone-400 hover:text-white transition-colors">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button onClick={() => setShowForm(true)} className="text-white font-semibold border-b border-white/40 hover:border-white transition-colors pb-0.5">
+              Dejar tu reseña
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+};
 
 const BookingFlow = ({ selectedService, allServices, onBack }: {
   selectedService: Service | null,
@@ -1731,9 +1813,431 @@ const TeamManagement = ({ teamRoster, onRosterChanged }: { teamRoster: TeamMembe
   );
 };
 
+const WebsiteCms = () => {
+  const { token } = useAuth();
+  const [tab, setTab] = useState<'profile' | 'projects' | 'reviews'>('profile');
+
+  // ── Perfil del negocio ──────────────────────────────────────────────
+  const [profile, setProfile] = useState<BusinessProfileAdmin | null>(null);
+  const [profileForm, setProfileForm] = useState<Partial<BusinessProfileAdmin>>({});
+  const [profileLogo, setProfileLogo] = useState<File | null>(null);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSaved, setProfileSaved] = useState(false);
+
+  useEffect(() => {
+    if (!token || tab !== 'profile') return;
+    fetchBusinessProfile(token).then(p => { setProfile(p); setProfileForm(p); }).catch(console.error);
+  }, [token, tab]);
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setSavingProfile(true);
+    setProfileError(null);
+    setProfileSaved(false);
+    try {
+      const { logo: _logo, ...rest } = profileForm;
+      const updated = await updateBusinessProfile(token, { ...rest, ...(profileLogo ? { logo: profileLogo } : {}) });
+      setProfile(updated);
+      setProfileForm(updated);
+      setProfileLogo(null);
+      setProfileSaved(true);
+    } catch (err: any) {
+      setProfileError(err.message);
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const pf = (k: keyof BusinessProfileAdmin) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    setProfileForm(prev => ({ ...prev, [k]: e.target.value }));
+
+  // ── Proyectos ────────────────────────────────────────────────────────
+  const [projects, setProjects] = useState<WebsiteProject[]>([]);
+  const [showNewProject, setShowNewProject] = useState(false);
+  const emptyProject = { title: '', subtitle: '', kind: '', description: '', estimated_price: '', is_featured: false, visible_on_website: true };
+  const [newProject, setNewProject] = useState(emptyProject);
+  const [newProjectImage, setNewProjectImage] = useState<File | null>(null);
+  const [savingProject, setSavingProject] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const [expandedProjectId, setExpandedProjectId] = useState<number | null>(null);
+  const [uploadingPhotoFor, setUploadingPhotoFor] = useState<number | null>(null);
+
+  const loadProjects = () => {
+    if (!token) return;
+    fetchAllProjects(token).then(setProjects).catch(console.error);
+  };
+  useEffect(() => { if (tab === 'projects') loadProjects(); }, [token, tab]);
+
+  const handleCreateProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setSavingProject(true);
+    setProjectError(null);
+    try {
+      await createProject(token, { ...newProject, ...(newProjectImage ? { image: newProjectImage } : {}) });
+      setNewProject(emptyProject);
+      setNewProjectImage(null);
+      setShowNewProject(false);
+      loadProjects();
+    } catch (err: any) {
+      setProjectError(err.message);
+    } finally {
+      setSavingProject(false);
+    }
+  };
+
+  const handleToggleProjectFlag = async (project: WebsiteProject, field: 'is_featured' | 'visible_on_website') => {
+    if (!token) return;
+    await updateProject(token, project.id, { [field]: !project[field] });
+    loadProjects();
+  };
+
+  const handleDeleteProject = async (id: number) => {
+    if (!token || !confirm('¿Eliminar este proyecto?')) return;
+    await deleteProject(token, id);
+    loadProjects();
+  };
+
+  const handleUploadPhoto = async (projectId: number, file: File) => {
+    if (!token) return;
+    setUploadingPhotoFor(projectId);
+    try {
+      await addProjectPhoto(token, projectId, file);
+      loadProjects();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setUploadingPhotoFor(null);
+    }
+  };
+
+  const handleDeletePhoto = async (id: number) => {
+    if (!token) return;
+    await deleteProjectPhoto(token, id);
+    loadProjects();
+  };
+
+  // ── Reseñas ──────────────────────────────────────────────────────────
+  const [reviews, setReviews] = useState<ShowcaseReview[]>([]);
+  const [reviewFilter, setReviewFilter] = useState<'pending' | 'verified'>('pending');
+
+  const loadReviews = () => {
+    if (!token) return;
+    fetchAllReviews(token, reviewFilter === 'verified').then(setReviews).catch(console.error);
+  };
+  useEffect(() => { if (tab === 'reviews') loadReviews(); }, [token, tab, reviewFilter]);
+
+  const handleApproveReview = async (id: number) => {
+    if (!token) return;
+    await setReviewVerified(token, id, true);
+    loadReviews();
+  };
+
+  const handleRejectReview = async (id: number) => {
+    if (!token || !confirm('¿Eliminar esta reseña?')) return;
+    await deleteReview(token, id);
+    loadReviews();
+  };
+
+  const iClass = "w-full px-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:border-stone-900 bg-white";
+
+  return (
+    <div className="space-y-6">
+      <div className="flex gap-2 bg-white rounded-full border border-stone-100 p-1.5 w-fit">
+        {([
+          { id: 'profile', label: 'Perfil' },
+          { id: 'projects', label: 'Proyectos' },
+          { id: 'reviews', label: 'Reseñas' },
+        ] as const).map(t => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={cn('px-4 py-2 rounded-full text-sm font-medium transition-all', tab === t.id ? 'bg-stone-900 text-white' : 'text-stone-500 hover:text-stone-900')}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'profile' && (
+        <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+          <h3 className="text-2xl font-serif mb-6">Perfil del negocio</h3>
+          {!profile ? (
+            <div className="flex justify-center py-12"><Loader size={24} className="text-stone-300 animate-spin" /></div>
+          ) : (
+            <form onSubmit={handleSaveProfile} className="space-y-4 max-w-2xl">
+              {profileError && <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{profileError}</p>}
+              {profileSaved && <p className="text-xs text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">Guardado.</p>}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Nombre comercial</p>
+                  <input className={iClass} value={profileForm.trade_name || ''} onChange={pf('trade_name')} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Razón legal</p>
+                  <input className={iClass} value={profileForm.legal_name || ''} onChange={pf('legal_name')} />
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Slogan</p>
+                <input className={iClass} value={profileForm.slogan || ''} onChange={pf('slogan')} placeholder="Ej: Elevando el estándar del cuidado de uñas" />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Email</p>
+                  <input type="email" className={iClass} value={profileForm.email || ''} onChange={pf('email')} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Teléfono</p>
+                  <input className={iClass} value={profileForm.phone || ''} onChange={pf('phone')} />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Dirección</p>
+                  <input className={iClass} value={profileForm.address || ''} onChange={pf('address')} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Ciudad</p>
+                  <input className={iClass} value={profileForm.city || ''} onChange={pf('city')} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">País</p>
+                  <input className={iClass} value={profileForm.country || ''} onChange={pf('country')} />
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Horario</p>
+                <input className={iClass} value={profileForm.schedule || ''} onChange={pf('schedule')} placeholder="Ej: Lun - Sáb: 9am - 7pm" />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Instagram</p>
+                  <input className={iClass} value={profileForm.social_instagram || ''} onChange={pf('social_instagram')} placeholder="https://instagram.com/…" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">TikTok</p>
+                  <input className={iClass} value={profileForm.social_tiktok || ''} onChange={pf('social_tiktok')} placeholder="https://tiktok.com/@…" />
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Logo</p>
+                <div className="flex items-center gap-3">
+                  {profile.logo && !profileLogo && (
+                    <img src={profile.logo} alt="Logo actual" className="w-12 h-12 rounded-full object-cover border border-stone-200" />
+                  )}
+                  <input type="file" accept="image/*" onChange={e => setProfileLogo(e.target.files?.[0] ?? null)} className="text-sm text-stone-500 file:mr-3 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:bg-stone-100 file:text-stone-700" />
+                </div>
+              </div>
+
+              <button disabled={savingProfile} className="bg-stone-900 text-white px-6 py-2.5 rounded-full text-sm font-medium hover:bg-stone-800 transition-colors disabled:opacity-50">
+                {savingProfile ? 'Guardando…' : 'Guardar cambios'}
+              </button>
+            </form>
+          )}
+        </div>
+      )}
+
+      {tab === 'projects' && (
+        <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm overflow-hidden">
+          <div className="p-8 border-b border-stone-100 flex items-center justify-between">
+            <h3 className="text-2xl font-serif">Proyectos (portafolio)</h3>
+            <button
+              onClick={() => setShowNewProject(v => !v)}
+              className={cn('flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-all', showNewProject ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600 hover:border-stone-900')}
+            >
+              <Plus size={15} /> Nuevo proyecto
+            </button>
+          </div>
+
+          {showNewProject && (
+            <form onSubmit={handleCreateProject} className="px-8 py-6 border-b border-stone-100 bg-stone-50 space-y-3">
+              {projectError && <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{projectError}</p>}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Título *</p>
+                  <input required className={iClass} value={newProject.title} onChange={e => setNewProject(p => ({ ...p, title: e.target.value }))} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Categoría</p>
+                  <input className={iClass} placeholder="Ej: manicura, boda" value={newProject.kind} onChange={e => setNewProject(p => ({ ...p, kind: e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Descripción</p>
+                <textarea rows={2} className={cn(iClass, 'resize-none')} value={newProject.description} onChange={e => setNewProject(p => ({ ...p, description: e.target.value }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Precio estimado</p>
+                  <input type="number" step="0.01" className={iClass} value={newProject.estimated_price} onChange={e => setNewProject(p => ({ ...p, estimated_price: e.target.value }))} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-1">Foto de portada</p>
+                  <input type="file" accept="image/*" onChange={e => setNewProjectImage(e.target.files?.[0] ?? null)} className="text-sm text-stone-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:bg-stone-100 file:text-stone-700" />
+                </div>
+              </div>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm text-stone-600">
+                  <input type="checkbox" checked={newProject.is_featured} onChange={e => setNewProject(p => ({ ...p, is_featured: e.target.checked }))} className="rounded" />
+                  Destacado
+                </label>
+                <label className="flex items-center gap-2 text-sm text-stone-600">
+                  <input type="checkbox" checked={newProject.visible_on_website} onChange={e => setNewProject(p => ({ ...p, visible_on_website: e.target.checked }))} className="rounded" />
+                  Visible en el sitio
+                </label>
+              </div>
+              <button disabled={savingProject} className="bg-stone-900 text-white text-sm px-5 py-2 rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50">
+                {savingProject ? 'Creando…' : 'Crear proyecto'}
+              </button>
+            </form>
+          )}
+
+          {projects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-48 text-stone-400">
+              <ImageIcon size={28} className="mb-3 text-stone-200" />
+              <p className="font-serif">Sin proyectos aún</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-stone-50">
+              {projects.map(project => (
+                <div key={project.id} className="p-6">
+                  <div className="flex items-center gap-4 cursor-pointer" onClick={() => setExpandedProjectId(id => id === project.id ? null : project.id)}>
+                    <div className="w-14 h-14 rounded-xl overflow-hidden bg-stone-100 shrink-0">
+                      {project.image && <img src={project.image} alt={project.title} className="w-full h-full object-cover" referrerPolicy="no-referrer" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-stone-900">{project.title}</p>
+                      <p className="text-xs text-stone-400">{project.photos.length} foto(s) de galería</p>
+                    </div>
+                    {project.is_featured && <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-100 text-amber-700">Destacado</span>}
+                    <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium', project.visible_on_website ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-500')}>
+                      {project.visible_on_website ? 'Visible' : 'Oculto'}
+                    </span>
+                    <ChevronDown size={16} className={cn('text-stone-400 transition-transform', expandedProjectId === project.id && 'rotate-180')} />
+                  </div>
+
+                  {expandedProjectId === project.id && (
+                    <div className="mt-4 pl-[4.5rem] space-y-4">
+                      <div className="flex gap-2">
+                        <button onClick={() => handleToggleProjectFlag(project, 'is_featured')} className="text-xs text-stone-600 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors">
+                          {project.is_featured ? 'Quitar destacado' : 'Marcar destacado'}
+                        </button>
+                        <button onClick={() => handleToggleProjectFlag(project, 'visible_on_website')} className="text-xs text-stone-600 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors">
+                          {project.visible_on_website ? 'Ocultar del sitio' : 'Mostrar en el sitio'}
+                        </button>
+                        <button onClick={() => handleDeleteProject(project.id)} className="text-xs text-red-500 hover:text-red-700 px-3 py-1.5 rounded-full border border-red-100 hover:bg-red-50 transition-colors">
+                          Eliminar proyecto
+                        </button>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Galería</p>
+                        <div className="flex flex-wrap gap-3">
+                          {project.photos.map(photo => (
+                            <div key={photo.id} className="relative w-20 h-20 rounded-lg overflow-hidden group">
+                              <img src={photo.image} alt={photo.caption} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              <button
+                                onClick={() => handleDeletePhoto(photo.id)}
+                                className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          ))}
+                          <label className="w-20 h-20 rounded-lg border-2 border-dashed border-stone-200 flex items-center justify-center cursor-pointer hover:border-stone-400 transition-colors">
+                            {uploadingPhotoFor === project.id ? (
+                              <Loader size={16} className="animate-spin text-stone-400" />
+                            ) : (
+                              <Plus size={20} className="text-stone-300" />
+                            )}
+                            <input
+                              type="file" accept="image/*" className="hidden"
+                              onChange={e => { const f = e.target.files?.[0]; if (f) handleUploadPhoto(project.id, f); }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'reviews' && (
+        <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm overflow-hidden">
+          <div className="p-8 border-b border-stone-100 flex items-center justify-between">
+            <h3 className="text-2xl font-serif">Reseñas</h3>
+            <div className="flex gap-2">
+              <button onClick={() => setReviewFilter('pending')} className={cn('px-4 py-2 rounded-full text-sm font-medium border transition-all', reviewFilter === 'pending' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600')}>
+                Pendientes
+              </button>
+              <button onClick={() => setReviewFilter('verified')} className={cn('px-4 py-2 rounded-full text-sm font-medium border transition-all', reviewFilter === 'verified' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-200 text-stone-600')}>
+                Publicadas
+              </button>
+            </div>
+          </div>
+
+          {reviews.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-48 text-stone-400">
+              <Star size={28} className="mb-3 text-stone-200" />
+              <p className="font-serif">{reviewFilter === 'pending' ? 'Sin reseñas pendientes' : 'Sin reseñas publicadas'}</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-stone-50">
+              {reviews.map(review => (
+                <div key={review.id} className="p-6 flex items-start gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="font-medium text-stone-900">{review.author_name}</p>
+                      {review.author_location && <span className="text-xs text-stone-400">· {review.author_location}</span>}
+                      <div className="flex gap-0.5 ml-1">
+                        {[1, 2, 3, 4, 5].map(i => (
+                          <Star key={i} size={12} className={cn(i <= review.rating ? "fill-amber-400 text-amber-400" : "text-stone-200")} />
+                        ))}
+                      </div>
+                    </div>
+                    <p className="text-sm text-stone-600 italic">"{review.comment}"</p>
+                  </div>
+                  {reviewFilter === 'pending' ? (
+                    <div className="flex gap-2 shrink-0">
+                      <button onClick={() => handleApproveReview(review.id)} className="text-xs bg-stone-900 text-white px-3 py-1.5 rounded-full hover:bg-stone-800 transition-colors">
+                        Aprobar
+                      </button>
+                      <button onClick={() => handleRejectReview(review.id)} className="text-xs text-red-500 hover:text-red-700 px-3 py-1.5 rounded-full border border-red-100 hover:bg-red-50 transition-colors">
+                        Rechazar
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => handleRejectReview(review.id)} className="text-xs text-stone-400 hover:text-red-600 px-3 py-1.5 rounded-full border border-stone-200 hover:border-red-200 transition-colors shrink-0">
+                      Eliminar
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }) => {
   const { token, user } = useAuth();
-  const [adminTab, setAdminTab] = useState<'services' | 'calendar' | 'users' | 'billing' | 'team'>('services');
+  const [adminTab, setAdminTab] = useState<'services' | 'calendar' | 'users' | 'billing' | 'team' | 'website'>('services');
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [selected, setSelected] = useState<Product | null>(null);
@@ -2192,7 +2696,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
 
   const inputClass = "w-full p-3 rounded-xl border border-stone-200 focus:outline-none focus:border-stone-900 text-sm";
 
-  const cards: { id: 'services' | 'calendar' | 'users' | 'billing' | 'team'; label: string; icon: React.ReactNode; value: string | number; sub: string }[] = [
+  const cards: { id: 'services' | 'calendar' | 'users' | 'billing' | 'team' | 'website'; label: string; icon: React.ReactNode; value: string | number; sub: string }[] = [
     { id: 'services', label: 'Servicios', icon: <ShoppingBag size={20} />, value: products.length,                          sub: `${products.filter(p => p.is_active).length} activos` },
     {
       id: 'calendar', label: 'Agenda', icon: <CalendarIcon size={20} />,
@@ -2203,6 +2707,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
     },
     { id: 'users',    label: 'Clientes',  icon: <User size={20} />,         value: customers.length,                            sub: customers.length > 0 ? `$${(customers.reduce((sum, c) => sum + parseFloat(c.total_spent), 0)).toLocaleString('es-ES', { maximumFractionDigits: 0 })} gastado` : 'Sin compras' },
     { id: 'billing',  label: 'Facturación', icon: <CreditCard size={20} />, value: treasuryData ? `$${(treasuryData.total_income ? parseFloat(treasuryData.total_income) : 0).toLocaleString('es-ES', { maximumFractionDigits: 0 })}` : '—', sub: treasuryData ? 'Ingresos del mes' : 'Cargando...' },
+    { id: 'website',  label: 'Sitio Web', icon: <ImageIcon size={20} />,    value: '—',                                      sub: 'Perfil, proyectos y reseñas' },
     ...(user?.is_superuser ? [{
       id: 'team' as const, label: 'Equipo', icon: <Users size={20} />,
       value: teamRoster.length,
@@ -2259,6 +2764,8 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
       {adminTab === 'team' && user?.is_superuser && (
         <TeamManagement teamRoster={teamRoster} onRosterChanged={loadTeamRoster} />
       )}
+
+      {adminTab === 'website' && <WebsiteCms />}
 
       {adminTab === 'users' && (
         <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm overflow-hidden">
@@ -3648,6 +4155,26 @@ const Footer = () => {
       © {new Date().getFullYear()} {business.legal_name || business.trade_name}.
       Todos los derechos reservados.
     </div>
+    <div className="border-t border-stone-200 mt-10">
+      <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] text-stone-400">
+        <a
+          href="#capacidades"
+          target="_blank"
+          rel="noreferrer"
+          className="hover:text-stone-900 transition-colors cursor-pointer font-semibold"
+        >
+          Capacidades de este website
+        </a>
+        <a
+          href="https://esfuerzovz.com"
+          target="_blank"
+          rel="noreferrer"
+          className="hover:text-stone-900 transition-colors cursor-pointer"
+        >
+          Desarrollado por EsfuerzoVZ
+        </a>
+      </div>
+    </div>
   </footer>
   );
 };
@@ -3665,14 +4192,187 @@ const AdminGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return <>{children}</>;
 };
 
+interface CapabilityGroup {
+  label: string;
+  modules: { title: string; items: string[] }[];
+}
+
+const CAPABILITY_GROUPS: CapabilityGroup[] = [
+  {
+    label: 'Sitio web público',
+    modules: [
+      {
+        title: 'Reserva de citas en línea',
+        items: [
+          'Elegir uno o varios servicios en la misma visita — la duración del turno se calcula sumando todos',
+          'La clienta elige "cualquiera disponible" o una manicurista específica por nombre y foto',
+          'Disponibilidad en tiempo real: respeta el horario y los bloqueos (vacaciones, ausencias) de cada persona del equipo',
+          'Cuenta de cliente: si ya inició sesión, el formulario de reserva se precarga con sus datos',
+        ],
+      },
+      {
+        title: 'Portafolio y reseñas',
+        items: [
+          'Catálogo de proyectos con foto de portada, galería, precio estimado y categoría',
+          'Reseñas verificadas por el equipo antes de publicarse',
+          'Formulario público para que cualquier clienta deje su reseña, pendiente de aprobación',
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Agenda y equipo',
+    modules: [
+      {
+        title: 'Calendario multi-persona',
+        items: [
+          'Cada manicurista tiene su propia cuenta y su propia agenda, aislada de las demás',
+          'La dueña ve y filtra la agenda de todo el equipo; cada manicurista solo ve la suya',
+          'Horario semanal individual y bloqueos personales (vacaciones, ausencias) por persona',
+          'Asignación automática al horario libre más próximo, o elección manual de quién atiende',
+        ],
+      },
+      {
+        title: 'Gestión de equipo',
+        items: [
+          'Alta de nuevas integrantes con su propia cuenta de acceso',
+          'Activar o desactivar cuentas sin perder el historial de citas',
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Facturación',
+    modules: [
+      {
+        title: 'Ingresos y gastos',
+        items: [
+          'Resumen mensual o anual de ingresos, gastos y ganancia neta',
+          'Registro de pagos completos o abonos parciales por cita',
+          'Categorías de gasto personalizables, creadas al vuelo desde el propio registro',
+          'Órdenes abiertas y cerradas, con su estado de pago siempre visible',
+        ],
+      },
+      {
+        title: 'Documentos',
+        items: [
+          'Emisión de recibos por servicio prestado',
+          'Clientes reales derivados de las órdenes — sin captura manual',
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Contenido autogestionable',
+    modules: [
+      {
+        title: 'Panel de sitio web',
+        items: [
+          'Editar los datos de la empresa (nombre, contacto, logo, horario, redes) sin ayuda técnica',
+          'Administrar el portafolio de proyectos mostrado al público, con galería de fotos',
+          'Aprobar o rechazar las reseñas enviadas antes de que se publiquen',
+        ],
+      },
+    ],
+  },
+];
+
+const CapabilitiesPresentation = ({ companyName }: { companyName?: string }) => {
+  const handleClose = () => { window.location.hash = ''; };
+
+  return (
+    <div className="min-h-screen bg-stone-50 text-stone-900">
+      <header className="sticky top-0 z-10 bg-white/90 backdrop-blur-md border-b border-stone-200">
+        <div className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between">
+          <button
+            onClick={handleClose}
+            className="flex items-center gap-1.5 text-xs font-bold text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
+          >
+            <ChevronRight className="rotate-180" size={14} />
+            <span>Volver al sitio</span>
+          </button>
+          <span className="text-[10px] font-bold uppercase tracking-widest text-stone-400">
+            Resumen de capacidades
+          </span>
+        </div>
+      </header>
+
+      <main className="max-w-3xl mx-auto px-6 py-16">
+        <p className="text-xs font-bold uppercase tracking-wider text-emerald-600 mb-3">
+          Resumen de capacidades
+        </p>
+        <h1 className="text-3xl md:text-4xl font-serif text-stone-900 leading-tight mb-4">
+          Sistema de gestión {companyName || 'MC Nails'}
+        </h1>
+        <p className="text-stone-500 max-w-xl leading-relaxed mb-14">
+          Reservas, agenda multi-persona, facturación y contenido del sitio, todo conectado en un solo sistema.
+        </p>
+
+        {CAPABILITY_GROUPS.map((group) => (
+          <div key={group.label}>
+            <p className="text-[11px] font-bold uppercase tracking-widest text-stone-400 mt-14 mb-1 first:mt-0">
+              {group.label}
+            </p>
+            {group.modules.map((mod) => (
+              <section key={mod.title} className="py-9 border-b border-stone-200">
+                <h2 className="text-lg font-serif text-stone-900 mb-5">{mod.title}</h2>
+                <ul className="space-y-3">
+                  {mod.items.map((item) => (
+                    <li key={item} className="flex gap-3 text-sm text-stone-600 leading-relaxed">
+                      <span className="w-2 h-0.5 bg-emerald-600 mt-2.5 shrink-0" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        ))}
+
+        <div className="mt-16 p-6 rounded-2xl bg-stone-900 text-white flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest text-stone-400 font-bold mb-1">Desarrollo</p>
+            <p className="font-bold text-sm">Este sistema fue construido por EsfuerzoVZ</p>
+          </div>
+          <a
+            href="https://esfuerzovz.com"
+            target="_blank"
+            rel="noreferrer"
+            className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0"
+          >
+            <span>Ver más desarrollos</span>
+            <ExternalLink size={14} />
+          </a>
+        </div>
+      </main>
+    </div>
+  );
+};
+
 function AppContent() {
+  const { business } = useBusiness();
   const [activeSection, setActiveSection] = useState<Section>('home');
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [services, setServices] = useState<Service[]>([]);
   const [showAuth, setShowAuth] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
 
+  // Página de capacidades: enlace del footer público, abre en pestaña nueva
+  // vía #capacidades — no usa react-router, así que se resuelve a mano.
+  const [showCapabilities, setShowCapabilities] = useState(
+    () => window.location.hash === '#capacidades'
+  );
+  useEffect(() => {
+    const onHashChange = () => setShowCapabilities(window.location.hash === '#capacidades');
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
   const openAuth = (mode: 'login' | 'register') => { setAuthMode(mode); setShowAuth(true); };
+
+  if (showCapabilities) {
+    return <CapabilitiesPresentation companyName={business.trade_name} />;
+  }
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

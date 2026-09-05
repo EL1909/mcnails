@@ -119,3 +119,51 @@ export async function updateTeamMember(
   if (!res.ok) throw new Error('Error al actualizar el miembro del equipo');
   return res.json();
 }
+
+// Perfil completo del negocio para el panel — no incluye hero_video_*
+// (MCnails no usa video de portada), aunque el backend sí los soporte.
+export interface BusinessProfileAdmin {
+  legal_name: string;
+  trade_name: string;
+  tax_id: string;
+  logo: string | null;
+  address: string;
+  city: string;
+  country: string;
+  country_code: string;
+  email: string;
+  phone: string;
+  currency: string;
+  slogan: string;
+  schedule: string;
+  social_instagram: string;
+  social_tiktok: string;
+  updated_at: string;
+}
+
+export async function fetchBusinessProfile(token: string): Promise<BusinessProfileAdmin> {
+  const res = await fetch(`${API_BASE}/profile/`, { headers: authHeader(token) });
+  if (!res.ok) throw new Error('No se pudo cargar el perfil del negocio');
+  return res.json();
+}
+
+export async function updateBusinessProfile(
+  token: string,
+  data: Partial<Omit<BusinessProfileAdmin, 'updated_at' | 'logo'>> & { logo?: File }
+): Promise<BusinessProfileAdmin> {
+  const form = new FormData();
+  Object.entries(data).forEach(([k, v]) => {
+    if (v !== undefined) form.append(k, v instanceof File ? v : String(v));
+  });
+  const res = await fetch(`${API_BASE}/profile/`, {
+    method: 'PATCH',
+    headers: authHeader(token),
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = Object.entries(err).map(([k, v]) => `${k}: ${v}`).join(' | ');
+    throw new Error(msg || 'Error al actualizar el perfil del negocio');
+  }
+  return res.json();
+}

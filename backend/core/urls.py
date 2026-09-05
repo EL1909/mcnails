@@ -16,6 +16,7 @@ urlpatterns = [
     path(f'{P}api/billing/', include('evz_billing.urls')),
     path(f'{P}api/sync/', include('evz_sync.urls')),
     path(f'{P}api/calendars/', include('evz_calendars.urls')),
+    path(f'{P}api/showcase/', include('evz_showcase.urls')),
 ]
 
 if settings.DEBUG:

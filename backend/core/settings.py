@@ -65,6 +65,9 @@ INSTALLED_APPS = [
     'evz_treasury',
     'evz_billing',
     'evz_calendars',
+    'evz_crm',
+    'evz_fieldwork',
+    'evz_showcase',
     'evz_sync',
     # Propias del cliente
     'accounts',
