@@ -1,5 +1,4 @@
 const API_BASE = '/mcnails/api/treasury';
-const SYNC_BASE = '/mcnails/api/sync';
 
 export interface SummaryData {
   period: string;
@@ -186,31 +185,6 @@ export async function createTransaction(token: string, data: {
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(error.detail || error.non_field_errors?.[0] || `Failed to create transaction: ${res.statusText}`);
-  }
-  return res.json();
-}
-
-export async function syncToEVZ(token: string, periodStart?: string, periodEnd?: string): Promise<any> {
-  const params = new URLSearchParams();
-  if (periodStart) params.append('start', periodStart);
-  if (periodEnd) params.append('end', periodEnd);
-
-  const url = params.toString()
-    ? `${SYNC_BASE}/publish/?${params.toString()}`
-    : `${SYNC_BASE}/publish/`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({}),
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(error.error || `Failed to sync with EVZ: ${res.statusText}`);
   }
   return res.json();
 }

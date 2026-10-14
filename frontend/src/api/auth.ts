@@ -11,7 +11,17 @@ export const login = async (identifier: string, password: string) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier, password }),
   });
-  if (!res.ok) throw new Error('Credenciales incorrectas');
+  if (!res.ok) {
+    // No asumir "credenciales incorrectas" para cualquier fallo: un 500 (ej.
+    // migración pendiente en el servidor) o un error de red se veían igual
+    // que una contraseña mala, lo que hacía imposible distinguir un
+    // problema real de servidor de un simple typo.
+    const err = await res.json().catch(() => null);
+    const msg = err?.detail || err?.error || (res.status >= 500
+      ? `Error del servidor (${res.status}). Intenta de nuevo en un momento.`
+      : 'Credenciales incorrectas');
+    throw new Error(msg);
+  }
   return res.json(); // { access, refresh }
 };
 

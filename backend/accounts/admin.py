@@ -29,5 +29,12 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ('email', 'first_name', 'last_name')
     ordering = ('-date_joined',)
 
+    def get_inline_instances(self, request, obj=None):
+        # Al crear el usuario la señal ya genera su Profile; mostrar el inline
+        # ahí intentaría crear un segundo. Se edita después, en el cambio.
+        if obj is None:
+            return []
+        return super().get_inline_instances(request, obj)
+
 
 admin.site.register(User, UserAdmin)

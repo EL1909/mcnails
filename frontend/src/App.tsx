@@ -29,7 +29,6 @@ import {
   Trash2,
   Filter,
   FileText,
-  Upload,
   ArrowLeft,
   ExternalLink,
 } from 'lucide-react';
@@ -46,7 +45,7 @@ import {
   type WebsiteProject, type Review as ShowcaseReview, type ReviewSubmission,
 } from './api/showcase';
 import { fetchBillingCounts, fetchReceipts, voidReceipt, issueReceipt } from './api/billing';
-import { fetchMonthlyStats, fetchTransactions, syncToEVZ, createTransaction, fetchExpenseCategories, createExpenseCategory, updateTransactionCategory, recordOrderPayment, fetchYearlySummary, type ExpenseCategory, type Transaction, type YearlySummaryData } from './api/treasury';
+import { fetchMonthlyStats, fetchTransactions, createTransaction, fetchExpenseCategories, createExpenseCategory, updateTransactionCategory, recordOrderPayment, fetchYearlySummary, type ExpenseCategory, type Transaction, type YearlySummaryData } from './api/treasury';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
@@ -56,6 +55,7 @@ import momentTimezonePlugin from '@fullcalendar/moment-timezone';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { BusinessProvider, useBusiness } from './context/BusinessContext';
 import { AuthModal } from './components/AuthModal';
+import { EvzSyncPanel } from './components/EvzSyncPanel';
 
 // Offset fijo del negocio (America/Caracas, UTC-4 sin DST). Se usa para
 // construir timestamps con hora local del negocio sin depender de la zona
@@ -2487,13 +2487,10 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
   const [detailedLoading, setDetailedLoading] = useState(false);
   const [transactionFilter, setTransactionFilter] = useState<'all' | 'income' | 'expense'>('all');
 
-  // Phase 3: EVZ Sync
-  const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   // Create transaction form
   const [showTransactionForm, setShowTransactionForm] = useState(false);
-  const [transactionForm, setTransactionForm] = useState({ direction: 'OUT', amount: '', date: new Date().toISOString().split('T')[0], description: '', method: 'cash', category: '' });
+  const [transactionForm, setTransactionForm] = useState({ direction: 'OUT' as 'IN' | 'OUT', amount: '', date: new Date().toISOString().split('T')[0], description: '', method: 'cash', category: '' });
   const [creatingTransaction, setCreatingTransaction] = useState(false);
   const [transactionError, setTransactionError] = useState<string | null>(null);
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
@@ -2877,9 +2874,9 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
       {adminTab === 'billing' && (
         <div className="space-y-6">
           {/* Header */}
-          <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-4">
+          <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-5 sm:p-8">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+              <div className="flex items-center gap-4 min-w-0">
                 <div className="w-12 h-12 bg-stone-100 rounded-2xl flex items-center justify-center text-stone-400">
                   <CreditCard size={22} />
                 </div>
@@ -2890,7 +2887,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
               </div>
               {billingTab === 'overview' && (
                 <button
-                  onClick={loadBillingData}
+                  onClick={() => loadBillingData()}
                   className="text-xs font-medium text-stone-500 hover:text-stone-900 px-3 py-1.5 rounded-full border border-stone-200 hover:border-stone-300 transition-colors"
                 >
                   Actualizar
@@ -2899,7 +2896,9 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
             </div>
 
             {/* Internal tabs */}
-            <div className="flex gap-2 border-b border-stone-100 -mx-8 px-8 pb-0">
+            {/* En móvil las 4 pestañas no caben: se desplazan en horizontal
+                en vez de ensanchar la tarjeta. */}
+            <div className="flex gap-1 sm:gap-2 border-b border-stone-100 -mx-5 px-5 sm:-mx-8 sm:px-8 pb-0 overflow-x-auto">
               {[
                 { id: 'overview', label: 'Resumen' },
                 { id: 'transactions', label: 'Movimientos' },
@@ -2910,7 +2909,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
                   key={tab.id}
                   onClick={() => setBillingTab(tab.id as any)}
                   className={cn(
-                    'px-4 py-3 text-sm font-medium border-b-2 transition-colors -mb-px',
+                    'px-3 sm:px-4 py-3 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap shrink-0',
                     billingTab === tab.id
                       ? 'border-stone-900 text-stone-900'
                       : 'border-transparent text-stone-500 hover:text-stone-700'
@@ -2928,7 +2927,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
               <AlertCircle size={18} className="text-red-500 mt-0.5 shrink-0" />
               <div>
                 <p className="text-sm font-medium text-red-900">{billingError}</p>
-                <button onClick={loadBillingData} className="text-xs text-red-600 hover:text-red-700 mt-2 font-medium">
+                <button onClick={() => loadBillingData()} className="text-xs text-red-600 hover:text-red-700 mt-2 font-medium">
                   Reintentar
                 </button>
               </div>
@@ -3897,7 +3896,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
 
           {/* Reports Tab */}
           {billingTab === 'reports' && (
-            <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-8">
+            <div className="bg-white rounded-[2.5rem] border border-stone-100 shadow-sm p-5 sm:p-8">
               <h4 className="text-lg font-serif text-stone-900 mb-6">Reportes</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* Top Customers */}
@@ -3940,50 +3939,7 @@ const AdminDashboard = ({ onServicesChanged }: { onServicesChanged: () => void }
                 {/* Sync Section */}
                 <div>
                   <h5 className="text-sm font-medium text-stone-600 mb-4">Sincronización</h5>
-                  <div className="p-4 rounded-2xl border-2 border-dashed border-stone-200 bg-stone-50">
-                    {syncMessage && (
-                      <div className="mb-4 p-3 rounded-lg bg-emerald-50 border border-emerald-200">
-                        <p className="text-sm text-emerald-700 font-medium">{syncMessage}</p>
-                      </div>
-                    )}
-                    <p className="text-sm text-stone-600 mb-4">
-                      Envía un resumen de tus facturas y movimientos a EsfuerzoVZ para mantener sincronizados tus datos financieros.
-                    </p>
-                    <button
-                      onClick={async () => {
-                        if (!token) return;
-                        setSyncing(true);
-                        try {
-                          const today = new Date();
-                          const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
-                          const periodStart = firstDay.toISOString().split('T')[0];
-                          const periodEnd = today.toISOString().split('T')[0];
-
-                          const result = await syncToEVZ(token, periodStart, periodEnd);
-                          setSyncMessage(`✓ ${result.status || 'Datos sincronizados'} exitosamente con EsfuerzoVZ`);
-                          setTimeout(() => setSyncMessage(null), 5000);
-                        } catch (err: any) {
-                          setSyncMessage(`✗ Error: ${err.message}`);
-                        } finally {
-                          setSyncing(false);
-                        }
-                      }}
-                      disabled={syncing}
-                      className="w-full bg-stone-900 text-white px-4 py-2.5 rounded-full text-sm font-medium hover:bg-stone-800 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-                    >
-                      {syncing ? (
-                        <>
-                          <Loader size={16} className="animate-spin" />
-                          Sincronizando...
-                        </>
-                      ) : (
-                        <>
-                          <Upload size={16} />
-                          Sincronizar con EsfuerzoVZ
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  {token && <EvzSyncPanel token={token} />}
                 </div>
               </div>
             </div>

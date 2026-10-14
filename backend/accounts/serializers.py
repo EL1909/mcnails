@@ -116,5 +116,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         email = (validated_data.get('email') or '').strip() or None
         validated_data['email'] = email
         user = User.objects.create_user(**validated_data)
-        Profile.objects.create(user=user, phone=phone)
+        # El Profile ya lo creó la señal post_save; solo se completa.
+        user.profile.phone = phone
+        user.profile.save(update_fields=['phone'])
         return user

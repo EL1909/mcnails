@@ -31,3 +31,6 @@ build/
 # Local env overrides
 .env.local
 .env.*.local
+
+# Datos demo: solo para pruebas locales, no debe llegar a la VM
+backend/accounts/management/commands/seed_demo.py

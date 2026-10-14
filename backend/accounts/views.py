@@ -138,7 +138,10 @@ class AdminCreateUserView(APIView):
         user.set_unusable_password()
         user.save()
 
-        Profile.objects.create(user=user, phone=phone, notes=notes)
+        # El Profile ya lo creó la señal post_save; solo se completa.
+        user.profile.phone = phone
+        user.profile.notes = notes
+        user.profile.save(update_fields=['phone', 'notes'])
 
         return Response(UserPublicSerializer(user).data, status=status.HTTP_201_CREATED)
 
